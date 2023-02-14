@@ -1,3 +1,5 @@
+#define TRUE          1
+#define FALSE         0
 #define NUM_BYTES     8
 #define RIGHT_MOT     4
 #define LEFT_MOT      3
@@ -38,19 +40,19 @@ void setup() {
   //set up gpio pin as output
   pinMode(PA5, OUTPUT); //A1
   //send signal to close relay
-  digitalWrite(PA5,1);
+  digitalWrite(PA5,1); //TODO: check if I need to use digital_io_write instead of this
     
   //turn on kraken
   //set up gpio pin as output
   pinMode(PA6, OUTPUT);    
   //send signal to close relay
   digitalWrite(PA6,1);
-    
-  
+
   //motor ESC initializtion sequence
   motor_esc_init();
 
-  //E-stop interrupt initalization sequence?
+  //E-stop interrupt initalization 
+  attachInterrupt(digitalPinToInterrupt(D3),E_stop,RISING); //TODO: check on pin number stuff
 
   //TODO: check if there is a time delay needed before taking readings from kraken
   //set up baud rate for UART
@@ -91,6 +93,8 @@ void loop() {
     case SPD_ADJ:
       //get doa data
       doa = data[DOA_BYTE_NUM];   
+      //TODO: add in power adjustment calculations
+      
       //calculate and set motor speeds      
       pwm_calc(doa);
       //go to get_data state
@@ -131,6 +135,7 @@ void pwm_calc(int doa)
   //variables for calculating proportional speed
   int error = 0;
   int calc_speed = 0;
+  int pwm_value = 0;
   
   //remap doa angle so 45 = 0
   int angle = doa - 45;
@@ -150,9 +155,17 @@ void pwm_calc(int doa)
     error = RIGHT_MAX - angle;
 
     calc_speed = proportional_calc(error);
-    
+
+    //get the calculated speed vvalue
+    calc_speed = sqrt(calc_speed);
+
+    //damping the power on an exponential curve
+    calc_speed = sqrt(calc_speed);    
+    //remap power level to pwm duty cycle range (60 - 80)
+    pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
+  
     //set the new value
-    TIM4_PWM.setPWM(RIGHT_MOT, D8, PWM_FREQ, calc_speed);
+    TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, pwm_value);
   }  
   else if((LEFT_MIN <= angle) && (angle <= LEFT_MAX)) //turn left
   {
@@ -162,9 +175,15 @@ void pwm_calc(int doa)
     //compute error
     error = LEFT_MAX - angle;
 
-    calc_speed = proportional_calc(error);
+    //get the calculated speed vvalue
+    calc_speed = sqrt(calc_speed);
+
+    //damping the power on an exponential curve
+    calc_speed = sqrt(calc_speed);    
+    //remap power level to pwm duty cycle range (60 - 80)
+    pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
       
-    TIM4_PWM.setPWM(RIGHT_MOT, D8, PWM_FREQ, calc_speed);
+    TIM4_PWM.setPWM(RIGHT_MOT, D8, PWM_FREQ, pwm_value);
   }
   else if((angle < RIGHT_MIN) && (angle > LEFT_MIN))//edge case where boat is backwards
   {
@@ -211,8 +230,8 @@ uint32_t proportional_calc(int error)
   {
     calc_speed = 170;
   }
-  //remap to PWM ranges (80-60)
-  calc_speed = map(calc_speed, ERROR_MIN, ERROR_MAX, PWM_STOP, PWM_MAX_FW);
+  //remap to power damping range (0 - 100)
+  calc_speed = map(calc_speed, ERROR_MIN, ERROR_MAX, 0, 100);
 
   return calc_speed;
 }
@@ -220,10 +239,37 @@ uint32_t proportional_calc(int error)
 E-Stop interrupt
 will be connect to pin that reads E-stop signal
 */
-// ISR()
-// {
+void E_stop()
+{
+  //set up flags for interrupt
+  static int stop_flag = FALSE;
+  static int re_start = TRUE;
+  //check if the stop flag is high
+  if(stop_flag == FALSE)
+  {
+    //if low then open relays and turn of motors
+    digitalWrite(PA7,1); //TODO: get the right pin number
 
-// }
+    //make stop flag high
+    stop_flag = TRUE;
+  }
+  //if stop flag high, check re-start flag
+  else if(re_start == FALSE)
+  {
+    //if it is low then make the flag high   
+    re_start = TRUE; 
+  }
+  else if((stop_flag == TRUE) && (re_start == TRUE))
+  {
+    //close the relays to turn the motors back on
+    digitalWrite(PA7,0); //TODO: get the right pin number 
+    //re-initalize motors for use
+    motor_esc_init();       
+    //reset flags
+    stop_flag = FALSE;
+    re_start = FALSE;
+  }
+}
 
 
 
