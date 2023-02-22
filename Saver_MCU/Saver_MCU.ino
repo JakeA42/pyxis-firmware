@@ -18,6 +18,9 @@
 #define ERROR_MAX     170
 #define ERROR_MIN     0
 
+#define pin           D9
+#define pin2          D10
+
 typedef enum STATE_TYPE
 {
   GET_DATA,
@@ -25,11 +28,18 @@ typedef enum STATE_TYPE
   MOV_HOLD
 }STATE_TYPE;
 
+//stuff needed for timers to do PWM
+TIM_TypeDef *Instance = (TIM_TypeDef *)pinmap_peripheral(digitalPinToPinName(pin), PinMap_PWM); //TIM4 channel 3
+TIM_TypeDef *Instance2 = (TIM_TypeDef *)pinmap_peripheral(digitalPinToPinName(pin2), PinMap_PWM); //TIM4 channel 4 (or at least it should be)
+
+HardwareTimer *left_timer = new HardwareTimer(Instance); //TIM4 channel 3
+HardwareTimer *right_timer = new HardwareTimer(Instance2); //TIM4 channel 4
+
+uint32_t left_channel3 = STM_PIN_CHANNEL(pinmap_function(digitalPinToPinName(pin), PinMap_PWM)); 
+uint32_t right_channel4 = STM_PIN_CHANNEL(pinmap_function(digitalPinToPinName(pin2), PinMap_PWM));
+
 //attach serial to D0 (Rx) and D1 (tx)
 HardwareSerial Serial1(D0, D1);
-
-//set up timer 4 for use
-HardwareTimer  TIM4_PWM(TIM4);
 
 //starting state for the state machine
 //didn't want to make it global but arduino is stupid
@@ -56,7 +66,7 @@ void setup() {
 
   //TODO: check if there is a time delay needed before taking readings from kraken
   //set up baud rate for UART
-  Serial1.begin(115200);
+  Serial1.begin(9600);
 
 
 }
@@ -103,8 +113,8 @@ void loop() {
 
     case MOV_HOLD:
       //change timer count to neutral timing
-      TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, PWM_STOP);
-      TIM4_PWM.setPWM(RIGHT_MOT, D9, PWM_FREQ, PWM_STOP);
+      left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_STOP);
+      right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_STOP);
       //go back to GET_DATA
       state = GET_DATA;
     break;    
@@ -117,13 +127,13 @@ motor ESC init sequence
 void motor_esc_init()
 {
   //create 50Hz pwm and give max speed signal
-  TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, PWM_MAX_FW); //TODO:check pins for this
-  TIM4_PWM.setPWM(RIGHT_MOT, D9, PWM_FREQ, PWM_MAX_FW);
+  left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_MAX_FW); //TODO:check pins for this
+  right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
   
   //give mid frequency stop signal
     //1.5ms pulse width
-  TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, PWM_STOP);
-  TIM4_PWM.setPWM(RIGHT_MOT, D9, PWM_FREQ, PWM_STOP);
+  left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_STOP);
+  right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_STOP);
 }
 
 /*
@@ -149,53 +159,55 @@ void pwm_calc(int doa)
   if((RIGHT_MIN <= angle) && (angle <= RIGHT_MAX))  //turn right
   {
     //make right motors full power
-    TIM4_PWM.setPWM(RIGHT_MOT, D8, PWM_FREQ, PWM_MAX_FW);
+    //TODO: change this so that it is dampened if needed
+    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
     
     //calculate the error
     error = RIGHT_MAX - angle;
 
+    //get the proportional speed
     calc_speed = proportional_calc(error);
 
-    //get the calculated speed vvalue
-    calc_speed = sqrt(calc_speed);
-
     //damping the power on an exponential curve
-    calc_speed = sqrt(calc_speed);    
+    calc_speed = sqrt(calc_speed);  
+      
     //remap power level to pwm duty cycle range (60 - 80)
     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
   
     //set the new value
-    TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, pwm_value);
+    left_timer->setPWM(left_channel3, pin, PWM_FREQ, pwm_value);
   }  
   else if((LEFT_MIN <= angle) && (angle <= LEFT_MAX)) //turn left
   {
     //make left motor full power
-    TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, PWM_MAX_FW);
+    //TODO: check if this needs to be dampened or not
+    left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_MAX_FW);
 
     //compute error
     error = LEFT_MAX - angle;
 
     //get the calculated speed vvalue
-    calc_speed = sqrt(calc_speed);
+    calc_speed = proportional_calc(calc_speed);
 
     //damping the power on an exponential curve
     calc_speed = sqrt(calc_speed);    
+
     //remap power level to pwm duty cycle range (60 - 80)
     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
       
-    TIM4_PWM.setPWM(RIGHT_MOT, D8, PWM_FREQ, pwm_value);
+    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, pwm_value);
   }
   else if((angle < RIGHT_MIN) && (angle > LEFT_MIN))//edge case where boat is backwards
   {
     //turn right
-    TIM4_PWM.setPWM(RIGHT_MOT, D8, PWM_FREQ, PWM_MAX_FW);
+    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
     //turn left motor off
-    TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, PWM_STOP);    
+    left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_STOP);    
   }
-  else //boat is head within the right direction keep moving forward
+  else //boat is headed within the right direction keep moving forward
   {
-    TIM4_PWM.setPWM(LEFT_MOT, D8, PWM_FREQ, PWM_MAX_FW); 
-    TIM4_PWM.setPWM(RIGHT_MOT, D9, PWM_FREQ, PWM_MAX_FW);
+    left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_MAX_FW); 
+    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
   }
 }
 
