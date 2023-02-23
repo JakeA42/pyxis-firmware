@@ -113,10 +113,11 @@ void loop() {
 
     case MOV_HOLD:
       //change timer count to neutral timing
-      left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_STOP);
-      right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_STOP);
+      PWM_change(PWM_STOP, PWM_STOP);
+
       //go back to GET_DATA
       state = GET_DATA;
+      
     break;    
   } 
 }
@@ -126,14 +127,23 @@ motor ESC init sequence
 */
 void motor_esc_init()
 {
-  //create 50Hz pwm and give max speed signal
-  left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_MAX_FW); //TODO:check pins for this
-  right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
+  //create 400Hz pwm and give max speed signal
+  left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_MAX_FW); //TODO:check pins for this //D10 
+  right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW); //D10
   
+  //delay the time needed for motors to recognize change
+  delay(1500);
+
   //give mid frequency stop signal
-    //1.5ms pulse width
-  left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_STOP);
-  right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_STOP);
+  //1.5ms pulse width
+  left_timer->pause();
+  right_timer->pause();
+
+  left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_STOP); //TODO:check pins for this //D10 
+  right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_STOP); //D10
+
+  left_timer->resume();
+  right_timer->resume();
 }
 
 /*
@@ -145,7 +155,7 @@ void pwm_calc(int doa)
   //variables for calculating proportional speed
   int error = 0;
   int calc_speed = 0;
-  int pwm_value = 0;
+  uint32_t pwm_value = 0;
   
   //remap doa angle so 45 = 0
   int angle = doa - 45;
@@ -158,10 +168,6 @@ void pwm_calc(int doa)
   //Check if boat needs to turn right or left
   if((RIGHT_MIN <= angle) && (angle <= RIGHT_MAX))  //turn right
   {
-    //make right motors full power
-    //TODO: change this so that it is dampened if needed
-    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
-    
     //calculate the error
     error = RIGHT_MAX - angle;
 
@@ -170,19 +176,17 @@ void pwm_calc(int doa)
 
     //damping the power on an exponential curve
     calc_speed = sqrt(calc_speed);  
+    
       
     //remap power level to pwm duty cycle range (60 - 80)
     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
   
-    //set the new value
-    left_timer->setPWM(left_channel3, pin, PWM_FREQ, pwm_value);
+    //change PWM values
+    PWM_change(pwm_value,PWM_MAX_FW); //TODO: check if right motor should be dampened
+
   }  
   else if((LEFT_MIN <= angle) && (angle <= LEFT_MAX)) //turn left
   {
-    //make left motor full power
-    //TODO: check if this needs to be dampened or not
-    left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_MAX_FW);
-
     //compute error
     error = LEFT_MAX - angle;
 
@@ -194,21 +198,36 @@ void pwm_calc(int doa)
 
     //remap power level to pwm duty cycle range (60 - 80)
     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
-      
-    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, pwm_value);
+  
+    //change duty cycles of the left and right motor
+    PWM_change(PWM_MAX_FW, pwm_value);  //TODO: check if left value needs to be dampened
+
   }
   else if((angle < RIGHT_MIN) && (angle > LEFT_MIN))//edge case where boat is backwards
   {
-    //turn right
-    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
-    //turn left motor off
-    left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_STOP);    
+    //change right motor to full power and left motor off
+    PWM_change(PWM_STOP, PWM_MAX_FW);     
   }
   else //boat is headed within the right direction keep moving forward
   {
-    left_timer->setPWM(left_channel3, pin, PWM_FREQ, PWM_MAX_FW); 
-    right_timer->setPWM(right_channel4, pin2, PWM_FREQ, PWM_MAX_FW);
+    PWM_change(PWM_MAX_FW,PWM_MAX_FW);  
   }
+}
+
+/*
+takes in the duty cycle for the left and right motor
+and adds in the right delays to set up the PWM
+*/
+void PWM_change(uint32_t left_DC, uint32_t right_DC)
+{
+  left_timer->pause();
+  right_timer->pause();
+  
+  left_timer->setPWM(left_channel3, pin, PWM_FREQ, left_DC); 
+  right_timer->setPWM(right_channel4, pin2, PWM_FREQ, right_DC);
+
+  left_timer->resume();
+  right_timer->resume();
 }
 
 /*
