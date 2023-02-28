@@ -1,15 +1,13 @@
 #define TRUE          1
 #define FALSE         0
-#define NUM_BYTES     8
+#define NUM_BYTES     20
 #define RIGHT_MOT     4
 #define LEFT_MOT      3
 #define PWM_FREQ      400
 #define PWM_MAX_FW    80
 #define PWM_MAX_RV    40 
 #define PWM_STOP      60 
-#define PWR_BYTE_NUM  3 //TODO: need to check this
-#define PWR_THRESH    10 //TODO: need to figure out what this will be
-#define DOA_BYTE_NUM  0
+#define PWR_THRESH    -20 
 #define P_K           1
 #define LEFT_MIN      185
 #define LEFT_MAX      355
@@ -46,6 +44,11 @@ HardwareSerial Serial1(D0, D1);
 STATE_TYPE state = GET_DATA;
 
 void setup() {
+  
+  //configure pin for interrupt output signal to relay
+  pinMode(D6, OUTPUT); //TODO: change pin for relay to correct one
+  digitalWrite(D6,1);
+  
   //turn on pi
   //set up gpio pin as output
   pinMode(PA5, OUTPUT); //A1
@@ -62,7 +65,7 @@ void setup() {
   motor_esc_init();
 
   //E-stop interrupt initalization 
-  attachInterrupt(digitalPinToInterrupt(D3),E_stop,RISING); //TODO: check on pin number stuff
+  attachInterrupt(digitalPinToInterrupt(D12),E_stop,FALLING); //TODO: check on pin number stuff
 
   //TODO: check if there is a time delay needed before taking readings from kraken
   //set up baud rate for UART
@@ -74,9 +77,12 @@ void setup() {
 void loop() {
   
   //TODO:check to see if this will cause issues. Might change them to static
-  u_char data[NUM_BYTES];
-  u_char power_data = 0;
+  char data[NUM_BYTES];
+   
+  float power_data = 0; //TODO: might want to change this to uint
   uint32_t doa = 0;
+  float conf = 0;  //TODO: might want to change this to uint
+
   uint32_t left_DC = 0;
   uint32_t right_DC = 0;
 
@@ -86,10 +92,15 @@ void loop() {
       //call the UART function to get all of the info needed
       UART(data);
 
-      //check the power data and see if it should move or stay put
-      power_data = data[PWR_BYTE_NUM];//TODO: Figure out what bytes will hold power info
+      //Break recieved data up and convert to numerical values
+      sscanf(data, "%i,%f,%f", &doa, &conf, &power_data);
+
+      //TESTING TAKE OUT LATER
+      // Serial.println(doa);
+      // Serial.println(conf);
+      // Serial.println(power_data);
       
-      //move to the next state
+      //check power data to determine which state to go to
       if(power_data > PWR_THRESH)
       {
         state = MOV_HOLD;       
@@ -100,11 +111,7 @@ void loop() {
       }
     break;      
 
-    case SPD_ADJ:
-      //get doa data
-      doa = data[DOA_BYTE_NUM];   
-      //TODO: add in power adjustment calculations
-      
+    case SPD_ADJ: 
       //calculate and set motor speeds      
       pwm_calc(doa);
       //go to get_data state
@@ -233,10 +240,8 @@ void PWM_change(uint32_t left_DC, uint32_t right_DC)
 /*
 Reads serial data
 */
-void UART(u_char recv_data[])
+void UART(char recv_data[])
 {
-  //TODO: figure out how many bytes we need
-
   //counter to keep track of how many bytes have been recieved
   uint8_t counter = 0;
 
@@ -246,6 +251,11 @@ void UART(u_char recv_data[])
     {
       //Read a byte from the Serial buffer
       recv_data[counter] = Serial1.read();
+
+      //check for newline character
+      if(recv_data[counter] == '\n')
+        break;
+      
       //increment counter
       counter++;
     }
@@ -279,7 +289,7 @@ void E_stop()
   if(stop_flag == FALSE)
   {
     //if low then open relays and turn of motors
-    digitalWrite(PA7,1); //TODO: get the right pin number
+    digitalWrite(D6,0); //TODO: get the right pin number
 
     //make stop flag high
     stop_flag = TRUE;
@@ -293,7 +303,7 @@ void E_stop()
   else if((stop_flag == TRUE) && (re_start == TRUE))
   {
     //close the relays to turn the motors back on
-    digitalWrite(PA7,0); //TODO: get the right pin number 
+    digitalWrite(D6,1); //TODO: get the right pin number 
     //re-initalize motors for use
     motor_esc_init();       
     //reset flags
