@@ -7,7 +7,7 @@
 #define PWM_MAX_FW    80
 #define PWM_MAX_RV    40 
 #define PWM_STOP      60 
-#define PWR_THRESH    -20 
+#define PWR_THRESH    20 
 #define P_K           1
 #define LEFT_MIN      185
 #define LEFT_MAX      355
@@ -16,8 +16,8 @@
 #define ERROR_MAX     170
 #define ERROR_MIN     0
 
-#define pin           D9
-#define pin2          D10
+#define pin           D10
+#define pin2          D9
 
 typedef enum STATE_TYPE
 {
@@ -46,20 +46,20 @@ STATE_TYPE state = GET_DATA;
 void setup() {
   
   //configure pin for interrupt output signal to relay
-  pinMode(D6, OUTPUT); //TODO: change pin for relay to correct one
-  digitalWrite(D6,1);
+  pinMode(PB15, OUTPUT); //CPOI pin
+  digitalWrite(PB15,1);
   
   //turn on pi
   //set up gpio pin as output
-  pinMode(PA5, OUTPUT); //A1
+  pinMode(A5, OUTPUT); 
   //send signal to close relay
-  digitalWrite(PA5,1); //TODO: check if I need to use digital_io_write instead of this
+  digitalWrite(A5,1); 
     
   //turn on kraken
   //set up gpio pin as output
-  pinMode(PA6, OUTPUT);    
+  pinMode(A4, OUTPUT);    
   //send signal to close relay
-  digitalWrite(PA6,1);
+  digitalWrite(A4,1);
 
   //motor ESC initializtion sequence
   motor_esc_init();
@@ -67,7 +67,6 @@ void setup() {
   //E-stop interrupt initalization 
   attachInterrupt(digitalPinToInterrupt(D12),E_stop,FALLING); //TODO: check on pin number stuff
 
-  //TODO: check if there is a time delay needed before taking readings from kraken
   //set up baud rate for UART
   Serial1.begin(9600);
 
@@ -79,12 +78,9 @@ void loop() {
   //TODO:check to see if this will cause issues. Might change them to static
   char data[NUM_BYTES];
    
-  float power_data = 0; //TODO: might want to change this to uint
-  uint32_t doa = 0;
-  float conf = 0;  //TODO: might want to change this to uint
-
-  uint32_t left_DC = 0;
-  uint32_t right_DC = 0;
+  static int32_t power_data = 0; 
+  static uint32_t doa = 0;
+  static uint32_t conf = 0;  
 
   switch(state)
   {
@@ -93,13 +89,8 @@ void loop() {
       UART(data);
 
       //Break recieved data up and convert to numerical values
-      sscanf(data, "%i,%f,%f", &doa, &conf, &power_data);
+      sscanf(data, "%i,%i,%i", &doa, &conf, &power_data);
 
-      //TESTING TAKE OUT LATER
-      // Serial.println(doa);
-      // Serial.println(conf);
-      // Serial.println(power_data);
-      
       //check power data to determine which state to go to
       if(power_data > PWR_THRESH)
       {
@@ -157,7 +148,7 @@ void motor_esc_init()
 PWM signal calculation function
 calculates the counter value for the capture compare channels then sets it
 */
-void pwm_calc(int doa)
+void pwm_calc(uint32_t doa)
 {
   //variables for calculating proportional speed
   int error = 0;
@@ -167,6 +158,7 @@ void pwm_calc(int doa)
   //remap doa angle so 45 = 0
   int angle = doa - 45;
   //check if the angle is negative, offset if it is
+
   if(angle < 0)
   {
     angle += 360;
@@ -176,15 +168,15 @@ void pwm_calc(int doa)
   if((RIGHT_MIN <= angle) && (angle <= RIGHT_MAX))  //turn right
   {
     //calculate the error
-    error = RIGHT_MAX - angle;
+    error = angle;
 
     //get the proportional speed
     calc_speed = proportional_calc(error);
 
     //damping the power on an exponential curve
-    calc_speed = sqrt(calc_speed);  
-    
-      
+    //TODO: either take out or change calculation
+    //calc_speed = sqrt(calc_speed);  
+
     //remap power level to pwm duty cycle range (60 - 80)
     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
   
@@ -196,12 +188,13 @@ void pwm_calc(int doa)
   {
     //compute error
     error = LEFT_MAX - angle;
-
+    
     //get the calculated speed vvalue
-    calc_speed = proportional_calc(calc_speed);
+    calc_speed = proportional_calc(error);
 
     //damping the power on an exponential curve
-    calc_speed = sqrt(calc_speed);    
+    //TODO: either take out or change calculation
+    //calc_speed = sqrt(calc_speed); 
 
     //remap power level to pwm duty cycle range (60 - 80)
     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
@@ -262,6 +255,11 @@ void UART(char recv_data[])
   }
 }
 
+
+/*
+* Takes in the doa error and then multiples it by the proportional constant.
+* once done it will map the speed to 0-100 range.
+*/
 uint32_t proportional_calc(int error)
 {
   uint32_t calc_speed;
@@ -289,7 +287,7 @@ void E_stop()
   if(stop_flag == FALSE)
   {
     //if low then open relays and turn of motors
-    digitalWrite(D6,0); //TODO: get the right pin number
+    digitalWrite(PB15,0); //TODO: get the right pin number
 
     //make stop flag high
     stop_flag = TRUE;
@@ -303,7 +301,7 @@ void E_stop()
   else if((stop_flag == TRUE) && (re_start == TRUE))
   {
     //close the relays to turn the motors back on
-    digitalWrite(D6,1); //TODO: get the right pin number 
+    digitalWrite(PB15,1); //TODO: get the right pin number 
     //re-initalize motors for use
     motor_esc_init();       
     //reset flags
@@ -311,12 +309,3 @@ void E_stop()
     re_start = FALSE;
   }
 }
-
-
-
-
-
-
-
-
-
