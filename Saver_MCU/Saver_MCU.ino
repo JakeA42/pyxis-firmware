@@ -65,7 +65,7 @@ void setup() {
   motor_esc_init();
 
   //E-stop interrupt initalization 
-  attachInterrupt(digitalPinToInterrupt(D12),E_stop,FALLING); //TODO: check on pin number stuff
+  attachInterrupt(digitalPinToInterrupt(D6),E_stop,FALLING);
 
   //set up baud rate for UART
   Serial1.begin(9600);
