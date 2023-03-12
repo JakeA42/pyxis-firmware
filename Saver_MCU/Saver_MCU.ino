@@ -52,6 +52,11 @@ STATE_TYPE state = GET_DATA;
 int standby_flag = 0;
 int start_flag = 0;
 
+void setupMotorPwm() {
+  TIM4_
+}
+
+
 void setup() {
   
   //set up motor relay pin
