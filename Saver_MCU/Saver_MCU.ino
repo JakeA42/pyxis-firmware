@@ -18,6 +18,12 @@
 
 #define pin           D10
 #define pin2          D9
+#define PI_PIN        A5
+#define KRAKEN_PIN    A4
+#define E_STOP_PIN    D6
+#define MOTOR_PIN     PB15  //COPI pin
+#define STANDBY_PIN   D11
+#define START_PIN     D12
 
 typedef enum STATE_TYPE
 {
@@ -43,32 +49,31 @@ HardwareSerial Serial1(D0, D1);
 //didn't want to make it global but arduino is stupid
 STATE_TYPE state = GET_DATA;
 
+int standby_flag = 0;
+int start_flag = 0;
+
 void setup() {
   
-  //configure pin for interrupt output signal to relay
-  pinMode(PB15, OUTPUT); //CPOI pin
-  digitalWrite(PB15,1);
+  //set up motor relay pin
+  pinMode(MOTOR_PIN, OUTPUT); 
   
-  //turn on pi
-  //set up gpio pin as output
-  pinMode(A5, OUTPUT); 
-  //send signal to close relay
-  digitalWrite(A5,1); 
+  //set up pi relay pin
+  pinMode(PI_PIN, OUTPUT); 
     
-  //turn on kraken
-  //set up gpio pin as output
-  pinMode(A4, OUTPUT);    
-  //send signal to close relay
-  digitalWrite(A4,1);
+  //set up kraken pin
+  pinMode(KRAKEN_PIN, OUTPUT);    
 
-  //motor ESC initializtion sequence
-  motor_esc_init();
+  pinMode(STANDBY_PIN, INPUT_PULLUP);
 
+  pinMode(START_PIN, INPUT_PULLUP);
+  
   //E-stop interrupt initalization 
-  attachInterrupt(digitalPinToInterrupt(D6),E_stop,FALLING);
+  pinMode(E_STOP_PIN,INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(E_STOP_PIN),E_stop,FALLING);
 
   //set up baud rate for UART
   Serial1.begin(9600);
+  Serial.begin(9600);
 
 
 }
@@ -81,6 +86,33 @@ void loop() {
   static int32_t power_data = 0; 
   static uint32_t doa = 0;
   static uint32_t conf = 0;  
+  
+  Serial.println(digitalRead(STANDBY_PIN));
+  Serial.println("test");
+
+  if((digitalRead(STANDBY_PIN) == 0) && (standby_flag == 0))
+  {
+    standby_flag = 1;
+    //turn on raspberry pi
+    digitalWrite(PI_PIN,1); 
+
+    //turn on kraken
+    digitalWrite(KRAKEN_PIN,1);
+
+    Serial.println("standby done");
+
+  }
+
+  if((digitalRead(START_PIN) == 0) && (start_flag == 0))
+  {
+    start_flag = 1;
+    //turn on motors
+    digitalWrite(MOTOR_PIN,1);
+    //initialize motors
+    motor_esc_init();
+
+    Serial.println("start done");
+  }
 
   switch(state)
   {
@@ -274,6 +306,7 @@ uint32_t proportional_calc(int error)
 
   return calc_speed;
 }
+
 /*
 E-Stop interrupt
 will be connect to pin that reads E-stop signal
@@ -287,7 +320,7 @@ void E_stop()
   if(stop_flag == FALSE)
   {
     //if low then open relays and turn of motors
-    digitalWrite(PB15,0); //TODO: get the right pin number
+    digitalWrite(MOTOR_PIN,0); //TODO: get the right pin number
 
     //make stop flag high
     stop_flag = TRUE;
@@ -301,7 +334,7 @@ void E_stop()
   else if((stop_flag == TRUE) && (re_start == TRUE))
   {
     //close the relays to turn the motors back on
-    digitalWrite(PB15,1); //TODO: get the right pin number 
+    digitalWrite(MOTOR_PIN,1); //TODO: get the right pin number 
     //re-initalize motors for use
     motor_esc_init();       
     //reset flags
@@ -309,3 +342,6 @@ void E_stop()
     re_start = FALSE;
   }
 }
+
+
+
