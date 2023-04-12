@@ -75,10 +75,7 @@ void loop() {
 
   //TODO:check to see if this will cause issues. Might change them to static
   char data[NUM_BYTES];
-  while(1)
-  {
-    Serial.println("Works for me");
-  }
+  
   static int32_t power_data = 0;
   static uint32_t doa = 0;
   static uint32_t conf = 0;
