@@ -1,3 +1,5 @@
+// Use Serial Monitor to change thruster speed.
+
 #define TRUE 1
 #define FALSE 0
 #define NUM_BYTES 20
@@ -31,11 +33,12 @@ bool NewMessage = FALSE;
 #define THRUSTER_FORWARD_LIMIT(x) (THRUSTER_NEUTRAL + THRUSTER_RANGE * x / 100)
 #define THRUSTER_REVERSE_LIMIT(x) (THRUSTER_NEUTRAL - THRUSTER_RANGE * x / 100)
 
+#define MOTOR_PIN PB15  //COPI pin
 #define PORT_PIN D10
 #define STAR_PIN D9
 
-#define THRUSTER_UPDATE_MAX_INTERVAL 2 // microsec
-#define THRUSTER_UPDATE_TIME 5000 // microsec
+#define THRUSTER_UPDATE_MAX_INTERVAL 2 // microsec. 1 breaks it
+#define THRUSTER_UPDATE_TIME 7500 // microsec
 
 //stuff needed for timers to do PWM
 TIM_TypeDef *tim1 = (TIM_TypeDef *)pinmap_peripheral(digitalPinToPinName(PORT_PIN), PinMap_PWM);  //TIM4 channel 3
@@ -53,6 +56,9 @@ bool CalculateNext = FALSE;
 
 void setup() {
 
+  //set up baud rate for UART
+  Serial.begin(115200);
+
   // Setup thruster PWMs  
   port_timer->pause();
   star_timer->pause();  
@@ -65,20 +71,26 @@ void setup() {
   port_timer->resume();
   star_timer->resume();
 
+  //motor ESC initializtion sequence
+  motor_esc_init();
+
   TIM_TypeDef *tim3 = TIM3;
   HardwareTimer *update_thrusters_timer = new HardwareTimer(tim3);
   update_thrusters_timer->setOverflow(THRUSTER_UPDATE_TIME, MICROSEC_FORMAT);
   update_thrusters_timer->attachInterrupt(update_thrusters);
   update_thrusters_timer->resume();
 
-  //motor ESC initializtion sequence
-  //motor_esc_init();
-
-  //set up baud rate for UART
-  Serial.begin(115200);
-
-  delay(5000);
-  Serial.println("Heyo");
+  Serial.println("Usage: <port_pwm_msec>,[star_pwm_msec]");
+  Serial.println();
+  Serial.println("Input range:  1000-2000");
+  Serial.println();
+  Serial.println("Examples:");
+  Serial.println("Stop:         1500,1500");
+  Serial.println("Full Forward: 2000,2000");
+  Serial.println("Full Reverse: 1000,1000");
+  Serial.println();
+  Serial.println("Note: Tolerates out of range positive values.");
+  Serial.println("      Does not tolerate negative values.");
 }
 
 void loop() {
@@ -90,6 +102,8 @@ void loop() {
 
   static int ForwardPowerPercentage = 100;
   static int ReversePowerPercentage = 100;
+  static int ForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * ForwardPowerPercentage / 100;
+  static int ReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * ReversePowerPercentage / 100;
   static int change = 0;  
   
   //call the UART function to get all of the info needed
@@ -103,35 +117,36 @@ void loop() {
   }
 
   if (CalculateNext) {
-    int currPortCC = port_timer->getCaptureCompare(port_channel, MICROSEC_COMPARE_FORMAT)+1; // +1? idk why
+    int currPortCC = port_timer->getCaptureCompare(port_channel, MICROSEC_COMPARE_FORMAT)+1; // +1 bc setting CCreg is one less than requested.
     int currStarCC = star_timer->getCaptureCompare(star_channel, MICROSEC_COMPARE_FORMAT)+1;
+
+    change = min(abs((int)PortTarget - currPortCC), THRUSTER_UPDATE_MAX_INTERVAL);
     
     if (PortTarget > currPortCC) {
-      change = min((int)PortTarget - currPortCC, THRUSTER_UPDATE_MAX_INTERVAL);
-      NextPortValue = min(THRUSTER_NEUTRAL + THRUSTER_RANGE * ForwardPowerPercentage / 100,
-                          currPortCC + change);
+      NextPortValue = min(ForwardPowerLimit, currPortCC + change);
     }
     else {
-      change = max((int)PortTarget - currPortCC, -1 * THRUSTER_UPDATE_MAX_INTERVAL);
-      NextPortValue = max(THRUSTER_NEUTRAL - THRUSTER_RANGE * ReversePowerPercentage / 100,
-                          currPortCC + change);
+      NextPortValue = max(ReversePowerLimit, currPortCC - change);
     }
     
-    if (change) {
-      Serial.println(change);
-      Serial.println(NextPortValue);
-    }
+    // Debug: change value predictably inconsistent. 
+    //        Either changes by THRUSTER_UPDATE_MAX_INTERVAL (correct)
+    //        or THRUSTER_UPDATE_MAX_INTERVAL-1 (incorrect).
+    // if (change) {
+    //   Serial.println();
+    //   Serial.println(currPortCC);      
+    //   Serial.println(change);
+    //   Serial.println(NextPortValue);
+    // }
 
-    // if (StarTarget >= currStarCC) {
-    //   NextStarValue = min(THRUSTER_NEUTRAL + THRUSTER_RANGE * ForwardPowerPercentage / 100,
-    //                       (int)min(currStarCC + THRUSTER_UPDATE_MAX_INTERVAL, 
-    //                           currStarCC + (StarTarget - currStarCC)));
-    // }
-    // else {
-    //   NextStarValue = max(THRUSTER_NEUTRAL - THRUSTER_RANGE * ReversePowerPercentage / 100,
-    //                       (int)max(currStarCC - THRUSTER_UPDATE_MAX_INTERVAL, 
-    //                           currStarCC - (currStarCC - StarTarget)));
-    // }
+    change = min(abs((int)StarTarget - currStarCC), THRUSTER_UPDATE_MAX_INTERVAL);
+    
+    if (StarTarget > currStarCC) {
+      NextStarValue = min(ForwardPowerLimit, currStarCC + change);
+    }
+    else {
+      NextStarValue = max(ReversePowerLimit, currStarCC - change);
+    }
 
     CalculateNext = FALSE;    
   }
@@ -140,13 +155,8 @@ void loop() {
 
 void update_thrusters() {
   
-  // Setup thruster PWMs
-  port_timer->pause();
-  star_timer->pause();
   port_timer->setCaptureCompare(port_channel, NextPortValue, MICROSEC_COMPARE_FORMAT);
   star_timer->setCaptureCompare(star_channel, NextStarValue, MICROSEC_COMPARE_FORMAT);  
-  port_timer->resume();
-  star_timer->resume();
 
   CalculateNext = TRUE;  
 }
@@ -175,25 +185,24 @@ int UART(char recv_data[], uint8_t msglen) {
 /*
 motor ESC init sequence 
 */
-// void motor_esc_init() {
-//   //create 400Hz pwm and give max speed signal
-//   //port_timer->setPWM(port_channel, port_pin, PWM_FREQ, PWM_MAX_FW);     //TODO:check pins for this //D10
-//   //star_timer->setPWM(star_channel, star_pin, PWM_FREQ, PWM_MAX_FW);  //D10
+void motor_esc_init() {
 
-//   //delay the time needed for motors to recognize change
-//   delay(1500);
+  pinMode(MOTOR_PIN, OUTPUT);
+  digitalWrite(MOTOR_PIN,1);
 
-//   //give mid frequency stop signal
-//   //1.5ms pulse width
-//   port_timer->pause();
-//   star_timer->pause();
+  delay(1000);
 
-//   // port_timer->setPWM(port_channel, port_pin, PWM_FREQ, PWM_STOP);  //TODO:check pins for this //D10
-//   // star_timer->setPWM(star_channel, star_pin, PWM_FREQ, PWM_STOP);  //D10
+  //create 400Hz pwm and give max speed signal
+  port_timer->setCaptureCompare(port_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
+  star_timer->setCaptureCompare(star_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
 
-//   port_timer->resume();
-//   star_timer->resume();
-// }
+  //delay the time needed for motors to recognize change
+  delay(1000);
+
+  //give mid frequency stop signal
+  port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+  star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+}
 
 /*
 PWM signal calculation function
@@ -260,24 +269,6 @@ calculates the counter value for the capture compare channels then sets it
 //   }
 // }
 
-/*
-takes in the duty cycle for the left and right motor
-and adds in the right delays to set up the PWM
-*/
-// void PWM_change(uint32_t left_DC, uint32_t right_DC) {
-//   port_timer->pause();
-//   star_timer->pause();
-
-//   // port_timer->setPWM(left_channel3, pin, PWM_FREQ, left_DC);
-//   // star_timer->setPWM(right_channel4, pin2, PWM_FREQ, right_DC);
-
-//   star_timer->resume();
-//   star_timer->resume();
-// }
-
-/*
-Reads serial data
-*/
 
 
 // /*
