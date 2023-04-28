@@ -89,8 +89,8 @@ void loop() {
   static int32_t power_data = 0; 
   static uint32_t doa = 0;
   static uint32_t conf = 0;  
-  static uint8_t num_samples = 0;
-  uint32_t windowed_doa = 180;
+  static uint32_t num_samples = 0;
+  static uint32_t windowed_doa = 180;
   static uint8_t filled_window;
   //Serial.println("Standvy Pin:");
   //Serial.println(digitalRead(OFF_PIN));
@@ -102,20 +102,25 @@ void loop() {
 
       //Break recieved data up and convert to numerical values
       sscanf(data, "%i,%i,%i", &doa, &conf, &power_data);
-
+      
+      /*Serial.print("UART_DATA: ");
+      Serial.print(data);
+      Serial.print("\n");*/
+      
       //check power data to determine which state to go to
       if(power_data > PWR_THRESH_MAX)
       {
         state = MOV_HOLD;       
       }
       //power is too low so ignore that signal
-      else if(power_data < PWR_THRESH_MAX)
+      else if(power_data < PWR_THRESH_MIN)
       {
-        state = GET_DATA
+        state = GET_DATA;
       }
       else
       {
         state = SPD_ADJ;
+        ++num_samples;
       }
     break;      
 
@@ -123,6 +128,14 @@ void loop() {
       //calculate and set motor speeds
       doa_window[num_samples % 8] = doa;
       windowed_doa = average_window(doa_window, WINDOW_SIZE);
+      
+      /*Serial.print("index: ");
+      Serial.print(num_samples % 8);
+      Serial.print("\n"); 
+      Serial.print("averaged value: ");
+      Serial.print(windowed_doa);
+      Serial.print("\n");*/
+      
       if(num_samples >= 8)
       {
         pwm_calc(windowed_doa);
@@ -318,7 +331,6 @@ void E_stop()
 
     //make stop flag high
     stop_flag = TRUE;
-    state = NO_STATE;
     Serial.println("E-Stopped triggered");
   }
   //if stop flag high, check re-start flag
@@ -336,7 +348,6 @@ void E_stop()
     //reset flags
     stop_flag = FALSE;
     re_start = FALSE;
-    state = GET_DATA;
     Serial.println("E-Stop restart triggered");
   }
 }
@@ -373,7 +384,7 @@ void Turn_Off()
   state = NO_STATE;
 }
 
-uint32_t average_window(uint32_t * window, window_size)
+uint32_t average_window(uint32_t * window, uint32_t window_size)
 {
   uint32_t sum = 0;
   for(int i = 0; i < window_size; i++)
