@@ -29,10 +29,6 @@ bool NewMessage = FALSE;
 #define THRUSTER_PWM_PERIOD 4000 //microsec
 #define THRUSTER_RANGE (THRUSTER_MAX_FORWARD - THRUSTER_NEUTRAL)
 
-// Argument (x) is percentage (0-100)
-#define THRUSTER_FORWARD_LIMIT(x) (THRUSTER_NEUTRAL + THRUSTER_RANGE * x / 100)
-#define THRUSTER_REVERSE_LIMIT(x) (THRUSTER_NEUTRAL - THRUSTER_RANGE * x / 100)
-
 #define MOTOR_PIN PB15  //COPI pin
 #define PORT_PIN D10
 #define STAR_PIN D9
@@ -132,12 +128,12 @@ void loop() {
     // Debug: change value predictably inconsistent. 
     //        Either changes by THRUSTER_UPDATE_MAX_INTERVAL (correct)
     //        or THRUSTER_UPDATE_MAX_INTERVAL-1 (incorrect).
-    // if (change) {
-    //   Serial.println();
-    //   Serial.println(currPortCC);      
-    //   Serial.println(change);
-    //   Serial.println(NextPortValue);
-    // }
+    if (change) {
+      Serial.println();
+      Serial.println(currPortCC);      
+      Serial.println(change);
+      Serial.println(NextPortValue);
+    }
 
     change = min(abs((int)StarTarget - currStarCC), THRUSTER_UPDATE_MAX_INTERVAL);
     
