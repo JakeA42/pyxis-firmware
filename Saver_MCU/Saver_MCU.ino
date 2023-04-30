@@ -24,8 +24,11 @@
 #define KRAKEN_PIN    A4
 #define E_STOP_PIN    D6
 #define MOTOR_PIN     PB15  //COPI pin
-#define OFF_PIN       D11
-#define START_PIN     D12
+//#define OFF_PIN       D11
+//#define START_PIN     D12
+#define SWITCH_PIN    D12
+#define SWITCH_ON     0
+#define SWITCH_OFF    1
 
 #define MSG_BUFF_SIZE 24
 #define MAX_MSG_LEN (MSG_BUFF_SIZE - 1)
@@ -37,6 +40,10 @@
 #define THRUSTER_RANGE (THRUSTER_MAX_FORWARD - THRUSTER_NEUTRAL)
 #define THRUSTER_UPDATE_MAX_INTERVAL 2 // microsec. 1 breaks it
 #define THRUSTER_UPDATE_TIME 7500 // microsec
+
+#define STALE_DATA_TIMEOUT 2000000 //microsec
+
+#define DEBUGGING TRUE
 
 typedef enum STATE_TYPE
 {
@@ -55,6 +62,12 @@ HardwareTimer *star_timer = new HardwareTimer(tim2);  //TIM4 channel 4
 uint32_t port_channel = STM_PIN_CHANNEL(pinmap_function(digitalPinToPinName(PORT_PIN), PinMap_PWM));
 uint32_t star_channel = STM_PIN_CHANNEL(pinmap_function(digitalPinToPinName(STAR_PIN), PinMap_PWM));
 
+TIM_TypeDef *tim3 = TIM3;
+HardwareTimer *update_thrusters_timer = new HardwareTimer(tim3);
+
+TIM_TypeDef *tim5 = TIM5;
+HardwareTimer *stale_data_timer = new HardwareTimer(tim5);
+
 uint32_t PortTarget = THRUSTER_NEUTRAL;
 uint32_t StarTarget = THRUSTER_NEUTRAL;
 uint32_t NextPortValue = THRUSTER_NEUTRAL;
@@ -72,32 +85,27 @@ int standby_flag = 0;
 int start_flag = 0;
 
 void setup() {
-  delay(5000);
-
   Serial.begin(115200); // PC
   PiSerial.begin(115200); // Pi
 
+  // Relays
+  pinMode(MOTOR_PIN, OUTPUT);
+  pinMode(PI_PIN, OUTPUT);
+  pinMode(KRAKEN_PIN, OUTPUT);
 
-  //set up motor relay pin
-  pinMode(MOTOR_PIN, OUTPUT); 
-  
-  //set up pi relay pin
-  pinMode(PI_PIN, OUTPUT); 
-    
-  //set up kraken pin
-  pinMode(KRAKEN_PIN, OUTPUT);    
+  delay(5000);
 
-  pinMode(OFF_PIN, INPUT_PULLUP);
-
-  pinMode(START_PIN, INPUT_PULLUP);
-  
-  //E-stop interrupt initalization 
+  // Pin Interrupts
   pinMode(E_STOP_PIN,INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(E_STOP_PIN),E_stop,FALLING);
-  attachInterrupt(digitalPinToInterrupt(OFF_PIN),Turn_Off,FALLING);
-  attachInterrupt(digitalPinToInterrupt(START_PIN),Turn_On,FALLING);
+  pinMode(SWITCH_PIN, INPUT_PULLUP);
+  // pinMode(OFF_PIN, INPUT_PULLUP);
+  // pinMode(START_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(E_STOP_PIN), E_stop, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SWITCH_PIN), Check_Switch, CHANGE);
+  // attachInterrupt(digitalPinToInterrupt(OFF_PIN), Turn_Off, FALLING);
+  // attachInterrupt(digitalPinToInterrupt(START_PIN), Turn_On, FALLING);
 
-  // Setup thruster PWMs  
+  // Thruster PWMs  
   port_timer->pause();
   star_timer->pause();  
   port_timer->setMode(port_channel, TIMER_OUTPUT_COMPARE_PWM1, PORT_PIN);
@@ -106,14 +114,17 @@ void setup() {
   star_timer->setOverflow(THRUSTER_PWM_PERIOD, MICROSEC_FORMAT);
   port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
   star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
-  port_timer->resume();
-  star_timer->resume();
 
-  TIM_TypeDef *tim3 = TIM3;
-  HardwareTimer *update_thrusters_timer = new HardwareTimer(tim3);
+  // Thruster update timer
+  update_thrusters_timer->pause();
   update_thrusters_timer->setOverflow(THRUSTER_UPDATE_TIME, MICROSEC_FORMAT);
   update_thrusters_timer->attachInterrupt(update_thrusters);
-  update_thrusters_timer->resume();
+
+  stale_data_timer->pause();
+  stale_data_timer->setOverflow(STALE_DATA_TIMEOUT, MICROSEC_FORMAT);
+  stale_data_timer->attachInterrupt(stale_data);
+  
+  dbprintln("Setup Complete");
 
 }
 
@@ -126,6 +137,7 @@ void loop() {
   static uint8_t PcMsgLen = 0;
   static uint8_t PiMsgReady = FALSE;
   static uint8_t PcMsgReady = FALSE;
+  static uint8_t NewPiData = FALSE;
 
   static uint32_t doa_window[WINDOW_SIZE] = {180};
   static int32_t power = 0; 
@@ -144,9 +156,11 @@ void loop() {
   checkPiSerial(PiMsg, &PiMsgLen, &PiMsgReady);
   if (PiMsgReady)
   {
-    Serial.println(PiMsg);
+    dbprintln(PiMsg);
     sscanf(PiMsg, "%i,%i,%i", &doa, &conf, &power);
-    state = VALIDATE_DATA;
+    PiMsgReady = FALSE;
+    PiMsgLen = 0;
+    NewPiData = TRUE;
   }
 
   if (CalculateNext) {
@@ -161,16 +175,6 @@ void loop() {
     else {
       NextPortValue = max(ReversePowerLimit, currPortCC - change);
     }
-    
-    // Debug: change value predictably inconsistent. 
-    //        Either changes by THRUSTER_UPDATE_MAX_INTERVAL (correct)
-    //        or THRUSTER_UPDATE_MAX_INTERVAL-1 (incorrect).
-    if (change) {
-      Serial.println();
-      Serial.println(currPortCC);      
-      Serial.println(change);
-      Serial.println(NextPortValue);
-    }
 
     change = min(abs((int)StarTarget - currStarCC), THRUSTER_UPDATE_MAX_INTERVAL);
     
@@ -184,8 +188,8 @@ void loop() {
     CalculateNext = FALSE;    
   }
 
-  //Serial.println("Standvy Pin:");
-  //Serial.println(digitalRead(OFF_PIN));
+  //dbprintln("Standvy Pin:");
+  //dbprintln(digitalRead(OFF_PIN));
   switch(state)
   {
     case WAIT_FOR_EVENT:
@@ -208,8 +212,16 @@ void loop() {
       // }
       // else
       // {
+      if (NewPiData)
+      {
+        stale_data_timer->pause();
+        stale_data_timer->setCount(1);
+        stale_data_timer->resume();
+        NewPiData = FALSE;
         state = SPD_ADJ;
         ++num_samples;
+      }
+        
       // }
     break;      
 
@@ -231,8 +243,7 @@ void loop() {
         filled_window = 1;        
       }
       //go to get_data state
-      CalculateNext = TRUE;
-      state = WAIT_FOR_EVENT;
+      state = VALIDATE_DATA;
     break;
 
     case STOP:
@@ -254,23 +265,51 @@ void loop() {
 /*
 motor ESC init sequence 
 */
-void motor_esc_init() {
+void thruster_init() {
 
-  pinMode(MOTOR_PIN, OUTPUT);
-  digitalWrite(MOTOR_PIN,1);
+  dbprintln("Initializing Thrusters");
 
-  delay(1000);
+  // turn on relay
+  digitalWrite(MOTOR_PIN, 1);
 
-  //create 400Hz pwm and give max speed signal
+  // 2000ms on time
   port_timer->setCaptureCompare(port_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
   star_timer->setCaptureCompare(star_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
 
-  //delay the time needed for motors to recognize change
-  delay(1000);
+  port_timer->resume();
+  star_timer->resume();
 
-  //give mid frequency stop signal
+  //delay the time needed for motors to recognize change
+  delay(2000);
+
+  // 1500ms on time
   port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
   star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+
+  delay(1000);
+
+  PortTarget = THRUSTER_NEUTRAL;
+  StarTarget = THRUSTER_NEUTRAL;
+  NextPortValue = THRUSTER_NEUTRAL;
+  NextStarValue = THRUSTER_NEUTRAL;
+
+  update_thrusters_timer->resume();
+}
+
+void stale_data()
+{
+  PortTarget = THRUSTER_NEUTRAL;
+  StarTarget = THRUSTER_NEUTRAL;
+}
+
+void thruster_stop()
+{
+  digitalWrite(MOTOR_PIN,0);
+  port_timer->pause();
+  star_timer->pause();
+  port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+  star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+  update_thrusters_timer->pause();
 }
 
 /*
@@ -282,6 +321,7 @@ void new_pwm_calc(uint32_t doa)
 {
   PortTarget = THRUSTER_NEUTRAL + doa;
   StarTarget = THRUSTER_NEUTRAL - doa;
+  Serial.printf("P: %d   S: %d\n", PortTarget, StarTarget);
 }
 
 // void pwm_calc(uint32_t doa)
@@ -351,7 +391,7 @@ void new_pwm_calc(uint32_t doa)
 // }
 
 void update_thrusters() {
-  
+
   port_timer->setCaptureCompare(port_channel, NextPortValue, MICROSEC_COMPARE_FORMAT);
   star_timer->setCaptureCompare(star_channel, NextStarValue, MICROSEC_COMPARE_FORMAT);  
 
@@ -363,14 +403,13 @@ void checkPiSerial(char recv_data[], uint8_t *msglen, uint8_t *flag) {
   while (PiSerial.available() && *msglen < MAX_MSG_LEN)
   {
     recv_data[*msglen] = PiSerial.read();
-
     if (recv_data[*msglen] == '\n')
     {
       recv_data[*msglen] = '\0';
       *flag = TRUE;    
 
     }
-    *msglen++; 
+    *msglen = *msglen + 1; 
   }
   if (*msglen == MAX_MSG_LEN)
   {
@@ -390,7 +429,7 @@ void checkPiSerial(char recv_data[], uint8_t *msglen, uint8_t *flag) {
 //       *flag = TRUE;    
 
 //     }
-//     *msglen++; 
+//     *msglen + 1; 
 //   }
 //   if (*msglen == MAX_MSG_LEN)
 //   {
@@ -431,11 +470,11 @@ void E_stop()
   if(stop_flag == FALSE)
   {
     //if low then open relays and turn of motors
-    digitalWrite(MOTOR_PIN,0); //TODO: get the right pin number
+    thruster_stop();
 
     //make stop flag high
     stop_flag = TRUE;
-    Serial.println("E-Stopped triggered");
+    dbprintln("E-Stopped triggered");
   }
   //if stop flag high, check re-start flag
   else if(re_start == FALSE)
@@ -445,48 +484,71 @@ void E_stop()
   }
   else if((stop_flag == TRUE) && (re_start == TRUE))
   {
-    //close the relays to turn the motors back on
-    digitalWrite(MOTOR_PIN,1); //TODO: get the right pin number 
     //re-initalize motors for use
-    motor_esc_init();       
+    thruster_init();       
     //reset flags
     stop_flag = FALSE;
     re_start = FALSE;
-    Serial.println("E-Stop restart triggered");
+    dbprintln("E-Stop restart triggered");
   }
 }
 
-void Turn_On()
+void Check_Switch()
 {
-  Serial.println("Turned On");
+  static int oldswitchstate = SWITCH_OFF;
+  static int switchstate;
+  delay(5);
+  switchstate = digitalRead(SWITCH_PIN);
+  if (switchstate == SWITCH_ON && oldswitchstate == SWITCH_OFF)
+  {
+    dbprintln("Turned On");
 
-  digitalWrite(PI_PIN,1); 
+    digitalWrite(PI_PIN,1); 
+    digitalWrite(KRAKEN_PIN,1);
 
-  //turn on kraken
-  digitalWrite(KRAKEN_PIN,1);
+    thruster_init();
 
-  //turn on motors
-  digitalWrite(MOTOR_PIN,1);
-
-  motor_esc_init();
-
-  state = WAIT_FOR_EVENT;
-}
-
-void Turn_Off()
-{
-  Serial.println("Turned Off");
+    oldswitchstate = switchstate;
+    state = VALIDATE_DATA;
+  }
+  else if (switchstate == SWITCH_OFF && oldswitchstate == SWITCH_ON)
+  {
+    dbprintln("Turned Off");
   
-  digitalWrite(PI_PIN,0); 
+    //digitalWrite(PI_PIN,0); // TODO: uncomment. commented for testing
+    //digitalWrite(KRAKEN_PIN,0); // TODO: uncomment. commented for testing
+  
+    thruster_stop();
 
-  //turn on kraken
-  digitalWrite(KRAKEN_PIN,0);
-
-  //turn on motors
-  digitalWrite(MOTOR_PIN,0);
-
-  state = NO_STATE;
+    oldswitchstate = switchstate;
+    state = WAIT_FOR_EVENT;
+  }
 }
+
+// void Turn_On()
+// {
+//   dbprintln("Turned On");
+
+//   digitalWrite(PI_PIN,1); 
+//   digitalWrite(KRAKEN_PIN,1);
+
+//   thruster_init();
+
+//   state = VALIDATE_DATA;
+// }
+
+// void Turn_Off()
+// {
+
+//   dbprintln("Turned Off");
+  
+//   //digitalWrite(PI_PIN,0); // TODO: uncomment. commented for testing
+//   //digitalWrite(KRAKEN_PIN,0); // TODO: uncomment. commented for testing
+  
+//   thruster_stop();
+
+//   state = WAIT_FOR_EVENT;
+// }
 
 uint32_t average_window(uint32_t * window, uint32_t window_size)
 {
@@ -496,6 +558,22 @@ uint32_t average_window(uint32_t * window, uint32_t window_size)
     sum += window[i];
   }
   return sum / window_size;
+}
+
+void dbprint(char *str)
+{
+  if (DEBUGGING)
+  {
+    Serial.print(str);
+  }
+}
+
+void dbprintln(char *str)
+{
+  if (DEBUGGING)
+  {
+    Serial.println(str);
+  }
 }
 
 
