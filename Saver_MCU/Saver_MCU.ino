@@ -16,7 +16,7 @@
 #define RIGHT_MIN       5
 #define ERROR_MAX       170
 #define ERROR_MIN       0
-#define WINDOW_SIZE     8
+#define DEAD_AHEAD      180
 
 #define PORT_PIN      D10
 #define STAR_PIN      D9
@@ -47,11 +47,8 @@
 
 typedef enum STATE_TYPE
 {
-  WAIT_FOR_EVENT,
-  VALIDATE_DATA,
-  SPD_ADJ,
+  GO,
   STOP,
-  NO_STATE
 }STATE_TYPE;
 
 //stuff needed for timers to do PWM
@@ -79,10 +76,12 @@ HardwareSerial PiSerial(D0, D1);
 
 //starting state for the state machine
 //didn't want to make it global but arduino is stupid
-STATE_TYPE state = NO_STATE;
+STATE_TYPE state = STOP;
 
 int standby_flag = 0;
 int start_flag = 0;
+
+
 
 void setup() {
   Serial.begin(115200); // PC
@@ -139,122 +138,83 @@ void loop() {
   static uint8_t PcMsgReady = FALSE;
   static uint8_t NewPiData = FALSE;
 
-  static uint32_t doa_window[WINDOW_SIZE] = {180};
   static int32_t power = 0; 
   static uint32_t doa = 0;
   static uint32_t conf = 0;  
-  static uint32_t num_samples = 0;
-  static uint32_t windowed_doa = 180;
+  static uint32_t processed_doa = DEAD_AHEAD;
   static uint8_t filled_window;
 
   static int ForwardPowerPercentage = 100;
   static int ReversePowerPercentage = 100;
   static int ForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * ForwardPowerPercentage / 100;
   static int ReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * ReversePowerPercentage / 100;
-  static int change = 0;
 
+  static uint32_t (*process_data)(uint32_t, uint32_t, int32_t, uint8_t) = single_doa; // preprocessing on data
+  static void (*move_boat)(uint32_t, int, int) = pivot_proportional; // movement control algorithm
+
+  int status = 0;
+
+  NewPiData = FALSE;
   checkPiSerial(PiMsg, &PiMsgLen, &PiMsgReady);
   if (PiMsgReady)
   {
     dbprintln(PiMsg);
-    sscanf(PiMsg, "%i,%i,%i", &doa, &conf, &power);
+    status = sscanf(PiMsg, "%i,%i,%i", &doa, &conf, &power);
     PiMsgReady = FALSE;
     PiMsgLen = 0;
-    NewPiData = TRUE;
+
+    if (status == 3 && doa >= 0 && doa < 360)
+    {
+      NewPiData = TRUE;
+    }
+    if (status > 0 && doa >= 400)
+    {
+      config_system(doa, conf, power, status);
+    }
   }
 
   if (CalculateNext) {
-    int currPortCC = port_timer->getCaptureCompare(port_channel, MICROSEC_COMPARE_FORMAT)+1; // +1 bc setting CCreg is one less than requested.
-    int currStarCC = star_timer->getCaptureCompare(star_channel, MICROSEC_COMPARE_FORMAT)+1;
-
-    change = min(abs((int)PortTarget - currPortCC), THRUSTER_UPDATE_MAX_INTERVAL);
-    
-    if (PortTarget > currPortCC) {
-      NextPortValue = min(ForwardPowerLimit, currPortCC + change);
-    }
-    else {
-      NextPortValue = max(ReversePowerLimit, currPortCC - change);
-    }
-
-    change = min(abs((int)StarTarget - currStarCC), THRUSTER_UPDATE_MAX_INTERVAL);
-    
-    if (StarTarget > currStarCC) {
-      NextStarValue = min(ForwardPowerLimit, currStarCC + change);
-    }
-    else {
-      NextStarValue = max(ReversePowerLimit, currStarCC - change);
-    }
-
+    next_thruster_values(ForwardPowerLimit, ReversePowerLimit);
     CalculateNext = FALSE;    
   }
 
-  //dbprintln("Standvy Pin:");
-  //dbprintln(digitalRead(OFF_PIN));
   switch(state)
   {
-    case WAIT_FOR_EVENT:
-      break;
-    case VALIDATE_DATA:
-      
-      /*Serial.print("UART_DATA: ");
-      Serial.print(data);
-      Serial.print("\n");*/
-      
-      //check power data to determine which state to go to
-      // if(power > PWR_THRESH_MAX)
-      // {
-      //   state = STOP;       
-      // }
-      // //power is too low so ignore that signal
-      // else if(power < PWR_THRESH_MIN)
-      // {
-      //   state = WAIT_FOR_EVENT;
-      // }
-      // else
-      // {
-      if (NewPiData)
+    case GO:
+
+      if (!NewPiData)
+      {
+        break;
+      }
+
+      if(power > PWR_THRESH_MAX) // close to target
+      {
+        state = STOP;
+        break;
+      }
+      else if(power < PWR_THRESH_MIN) // beacon off
+      {
+        break;
+      }
+      else // new data to process
       {
         stale_data_timer->pause();
         stale_data_timer->setCount(1);
         stale_data_timer->resume();
-        NewPiData = FALSE;
-        state = SPD_ADJ;
-        ++num_samples;
-      }
-        
-      // }
-    break;      
 
-    case SPD_ADJ: 
-      //calculate and set motor speeds
-      doa_window[num_samples % 8] = doa;
-      windowed_doa = average_window(doa_window, WINDOW_SIZE);
-      
-      /*Serial.print("index: ");
-      Serial.print(num_samples % 8);
-      Serial.print("\n"); 
-      Serial.print("averaged value: ");
-      Serial.print(windowed_doa);
-      Serial.print("\n");*/
-      
-      if(num_samples >= 8)
-      {
-        new_pwm_calc(windowed_doa);
-        filled_window = 1;        
+        processed_doa = process_data(doa, conf, power, FALSE);
+        if (processed_doa >= 0 && processed_doa < 360)
+        {
+          move_boat(processed_doa, ForwardPowerLimit, ReversePowerLimit);
+          Serial.printf("P: %d   S: %d\n", PortTarget, StarTarget);
+        }
       }
-      //go to get_data state
-      state = VALIDATE_DATA;
+
     break;
 
     case STOP:
-      //TODO: fix
-      //change timer count to neutral timing
       StarTarget = THRUSTER_NEUTRAL;
       PortTarget = THRUSTER_NEUTRAL;
-
-      //go back to GET_DATA
-      state = WAIT_FOR_EVENT;
-      
     break;
 
     default:
@@ -262,67 +222,126 @@ void loop() {
   } 
 }
 
-/*
-motor ESC init sequence 
-*/
-void thruster_init() {
-
-  dbprintln("Initializing Thrusters");
-
-  // turn on relay
-  digitalWrite(MOTOR_PIN, 1);
-
-  // 2000ms on time
-  port_timer->setCaptureCompare(port_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
-  star_timer->setCaptureCompare(star_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
-
-  port_timer->resume();
-  star_timer->resume();
-
-  //delay the time needed for motors to recognize change
-  delay(2000);
-
-  // 1500ms on time
-  port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
-  star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
-
-  delay(1000);
-
-  PortTarget = THRUSTER_NEUTRAL;
-  StarTarget = THRUSTER_NEUTRAL;
-  NextPortValue = THRUSTER_NEUTRAL;
-  NextStarValue = THRUSTER_NEUTRAL;
-
-  update_thrusters_timer->resume();
-}
-
-void stale_data()
+void config_system(uint32_t opcode, uint32_t arg1, int32_t arg2, int status)
 {
-  PortTarget = THRUSTER_NEUTRAL;
-  StarTarget = THRUSTER_NEUTRAL;
+  switch (status)
+  {
+    case 1: // no arg1 or arg2
+
+
+    break;
+    case 2: // arg1
+      switch(opcode)
+      {
+        case 400:
+          
+        break;
+
+      }
+
+    break;
+
+    case 3: // arg1 and arg2
+      
+
+    break;
+
+    default:
+    break;
+  }
+  
 }
 
-void thruster_stop()
+///////////////////////////////////////////////////////////////////////////////
+///                          Movement Modes
+///////////////////////////////////////////////////////////////////////////////
+void pivot_cw(uint32_t doa, int forwardlimit, int reverselimit)
 {
-  digitalWrite(MOTOR_PIN,0);
-  port_timer->pause();
-  star_timer->pause();
-  port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
-  star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
-  update_thrusters_timer->pause();
+  PortTarget = forwardlimit;
+  StarTarget = reverselimit;
+  dbprint("Pivot CW => ");
 }
 
-/*
-PWM signal calculation function
-calculates the counter value for the capture compare channels then sets it
-*/
-
-void new_pwm_calc(uint32_t doa)
+void pivot_ccw(uint32_t doa, int forwardlimit, int reverselimit)
 {
-  PortTarget = THRUSTER_NEUTRAL + doa;
-  StarTarget = THRUSTER_NEUTRAL - doa;
-  Serial.printf("P: %d   S: %d\n", PortTarget, StarTarget);
+  PortTarget = reverselimit;
+  StarTarget = forwardlimit;
+  dbprint("Pivot CCW => ");
 }
+
+void pivot_proportional(uint32_t doa, int forwardlimit, int reverselimit)
+{
+  // may want to use some other variables than forwardlimit and reverse limit
+
+  if (doa >= DEAD_AHEAD)
+  {
+    // may have these backwards
+    PortTarget = THRUSTER_NEUTRAL + (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL - (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD;
+  }
+  else
+  {
+    PortTarget = THRUSTER_NEUTRAL - (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL + (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD;
+  }
+  dbprint("Pivot Proportional => ");
+}
+
+void pivot_quadratic(uint32_t doa, int forwardlimit, int reverselimit)
+{
+  // may want to use some other variables than forwardlimit and reverse limit
+
+  if (doa >= DEAD_AHEAD)
+  {
+    // may have these backwards
+    PortTarget = THRUSTER_NEUTRAL + 
+                (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / THRUSTER_RANGE + 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL - 
+                (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / THRUSTER_RANGE - 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / DEAD_AHEAD;
+  }
+  else
+  {
+    PortTarget = THRUSTER_NEUTRAL - 
+                (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / THRUSTER_RANGE - 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL + 
+                (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / THRUSTER_RANGE + 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / DEAD_AHEAD;
+  }
+  dbprint("Pivot Proportional => ");
+}
+
+void pivot_exponential(uint32_t doa, int forwardlimit, int reverselimit)
+{
+  uint8_t exp = 3; // make parameter
+  uint32_t offset;
+
+  offset = THRUSTER_RANGE * pow(((double)doa - DEAD_AHEAD) / DEAD_AHEAD, exp);
+
+  if (doa >= DEAD_AHEAD)
+  {
+    // may have these backwards
+    PortTarget = THRUSTER_NEUTRAL + offset;
+    StarTarget = THRUSTER_NEUTRAL - offset;
+  }
+  else
+  {
+    PortTarget = THRUSTER_NEUTRAL - offset;
+    StarTarget = THRUSTER_NEUTRAL + offset;
+  }
+  dbprint("Pivot Exponential => ");
+}
+
+static void (*move_boat[])(uint32_t, int, int) 
+{
+  pivot_cw,
+  pivot_ccw,
+  pivot_proportional,
+  pivot_quadratic,
+  pivot_exponential
+};
 
 // void pwm_calc(uint32_t doa)
 // {
@@ -390,6 +409,136 @@ void new_pwm_calc(uint32_t doa)
 //   }
 // }
 
+
+///////////////////////////////////////////////////////////////////////////////
+///                      Preprocessing Functions
+///////////////////////////////////////////////////////////////////////////////
+uint32_t single_doa(uint32_t doa, uint32_t conf, int32_t power, uint8_t reset)
+{
+  return doa;
+}
+
+uint32_t window_doa(uint32_t doa, uint32_t conf, int32_t power, uint8_t reset)
+{
+  static const uint8_t window_size = 8;
+  static uint32_t window[window_size] = {DEAD_AHEAD};
+  static uint8_t num_samples = 0;
+  static uint8_t filled_window = FALSE;
+
+  // reset when changing preprocessing method
+  if (reset)
+  {
+    for (int i = 0; i < window_size; i++)
+    {
+      window[i] = DEAD_AHEAD;
+    }
+    filled_window = FALSE;
+    return -1; // return value should indicate invalid doa
+  }
+
+  // add new entry
+  window[num_samples++ % window_size] = doa;
+
+  if (num_samples >= window_size)
+  {
+    filled_window = TRUE;
+  }
+
+  if (!filled_window)
+  {
+    return -1; 
+  }
+
+  uint32_t sum = 0;
+  for(int i = 0; i < window_size; i++)
+  {
+    sum += window[i];
+  }
+
+  return sum / window_size;
+}
+
+uint32_t (*preprocessors[])(uint32_t, uint32_t, int32_t, uint8_t) = 
+{
+  single_doa,
+  window_doa
+};
+
+///////////////////////////////////////////////////////////////////////////////
+///             Periodic Thruster Updating Functions
+///////////////////////////////////////////////////////////////////////////////
+void next_thruster_values(int ForwardPowerLimit, int ReversePowerLimit) {
+
+    int currPortCC = port_timer->getCaptureCompare(port_channel, MICROSEC_COMPARE_FORMAT)+1; // +1 bc setting CCreg is one less than requested.
+    int currStarCC = star_timer->getCaptureCompare(star_channel, MICROSEC_COMPARE_FORMAT)+1;
+    int change = min(abs((int)PortTarget - currPortCC), THRUSTER_UPDATE_MAX_INTERVAL);
+    
+    if (PortTarget > currPortCC) {
+      NextPortValue = min(ForwardPowerLimit, currPortCC + change);
+    }
+    else {
+      NextPortValue = max(ReversePowerLimit, currPortCC - change);
+    }
+
+    change = min(abs((int)StarTarget - currStarCC), THRUSTER_UPDATE_MAX_INTERVAL);
+    
+    if (StarTarget > currStarCC) {
+      NextStarValue = min(ForwardPowerLimit, currStarCC + change);
+    }
+    else {
+      NextStarValue = max(ReversePowerLimit, currStarCC - change);
+    }
+
+}
+
+void thruster_init() {
+
+  dbprintln("Initializing Thrusters");
+
+  // turn on relay
+  digitalWrite(MOTOR_PIN, 1);
+
+  // 2000ms on time
+  port_timer->setCaptureCompare(port_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
+  star_timer->setCaptureCompare(star_channel, THRUSTER_MAX_FORWARD, MICROSEC_COMPARE_FORMAT);
+
+  port_timer->resume();
+  star_timer->resume();
+
+  //delay the time needed for motors to recognize change
+  delay(2000);
+
+  // 1500ms on time
+  port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+  star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+
+  delay(1000);
+
+  PortTarget = THRUSTER_NEUTRAL;
+  StarTarget = THRUSTER_NEUTRAL;
+  NextPortValue = THRUSTER_NEUTRAL;
+  NextStarValue = THRUSTER_NEUTRAL;
+
+  update_thrusters_timer->resume();
+}
+
+void thruster_stop()
+{
+  digitalWrite(MOTOR_PIN,0);
+  port_timer->pause();
+  star_timer->pause();
+  port_timer->setCaptureCompare(port_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+  star_timer->setCaptureCompare(star_channel, THRUSTER_NEUTRAL, MICROSEC_COMPARE_FORMAT);
+  update_thrusters_timer->pause();
+}
+
+void stale_data()
+{
+  state = STOP;
+}
+
+
+
 void update_thrusters() {
 
   port_timer->setCaptureCompare(port_channel, NextPortValue, MICROSEC_COMPARE_FORMAT);
@@ -416,27 +565,6 @@ void checkPiSerial(char recv_data[], uint8_t *msglen, uint8_t *flag) {
     *flag = TRUE;
   }
 }
-
-// void checkPcSerial(char recv_data[], uint8_t *msglen, uint8_t *flag) {
-
-//   while (PcSerial.available() && msglen < MAX_MSG_LEN)
-//   {
-//     recv_data[*msglen] = Serial.read();
-
-//     if (recv_data[*msglen] == '\n')
-//     {
-//       recv_data[*msglen] = '\0';
-//       *flag = TRUE;    
-
-//     }
-//     *msglen + 1; 
-//   }
-//   if (*msglen == MAX_MSG_LEN)
-//   {
-//     *flag = TRUE;
-//   }
-// }
-
 
 /*
 * Takes in the doa error and then multiples it by the proportional constant.
@@ -465,7 +593,7 @@ void E_stop()
 {
   //set up flags for interrupt
   static int stop_flag = FALSE;
-  static int re_start = TRUE;
+  static int re_start = FALSE; // changed from TRUE.
   //check if the stop flag is high
   if(stop_flag == FALSE)
   {
@@ -509,7 +637,7 @@ void Check_Switch()
     thruster_init();
 
     oldswitchstate = switchstate;
-    state = VALIDATE_DATA;
+    state = GO;
   }
   else if (switchstate == SWITCH_OFF && oldswitchstate == SWITCH_ON)
   {
@@ -521,43 +649,8 @@ void Check_Switch()
     thruster_stop();
 
     oldswitchstate = switchstate;
-    state = WAIT_FOR_EVENT;
+    state = STOP;
   }
-}
-
-// void Turn_On()
-// {
-//   dbprintln("Turned On");
-
-//   digitalWrite(PI_PIN,1); 
-//   digitalWrite(KRAKEN_PIN,1);
-
-//   thruster_init();
-
-//   state = VALIDATE_DATA;
-// }
-
-// void Turn_Off()
-// {
-
-//   dbprintln("Turned Off");
-  
-//   //digitalWrite(PI_PIN,0); // TODO: uncomment. commented for testing
-//   //digitalWrite(KRAKEN_PIN,0); // TODO: uncomment. commented for testing
-  
-//   thruster_stop();
-
-//   state = WAIT_FOR_EVENT;
-// }
-
-uint32_t average_window(uint32_t * window, uint32_t window_size)
-{
-  uint32_t sum = 0;
-  for(int i = 0; i < window_size; i++)
-  {
-    sum += window[i];
-  }
-  return sum / window_size;
 }
 
 void dbprint(char *str)
