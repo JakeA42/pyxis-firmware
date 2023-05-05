@@ -1,22 +1,11 @@
 #define TRUE            1
 #define FALSE           0
-#define NUM_BYTES       20
-#define RIGHT_MOT       4
-#define LEFT_MOT        3
-#define PWM_FREQ        400
-#define PWM_MAX_FW      80
-#define PWM_MAX_RV      40 
-#define PWM_STOP        60 
-#define PWR_THRESH_MAX  -140 
-#define PWR_THRESH_MIN  -600
-#define P_K             1
-#define LEFT_MIN        185
-#define LEFT_MAX        355
-#define RIGHT_MAX       175
-#define RIGHT_MIN       5
-#define ERROR_MAX       170
-#define ERROR_MIN       0
+#define SIG_POWER_MAX   -140 
+#define SIG_POWER_MIN   -600
+#define P_K             1 // delete
 #define DEAD_AHEAD      180
+#define ANGLE_WIDE      30
+#define ANGLE_TIGHT     15
 
 #define PORT_PIN      D10
 #define STAR_PIN      D9
@@ -65,10 +54,10 @@ HardwareTimer *update_thrusters_timer = new HardwareTimer(tim3);
 TIM_TypeDef *tim5 = TIM5;
 HardwareTimer *stale_data_timer = new HardwareTimer(tim5);
 
-uint32_t PortTarget = THRUSTER_NEUTRAL;
-uint32_t StarTarget = THRUSTER_NEUTRAL;
-uint32_t NextPortValue = THRUSTER_NEUTRAL;
-uint32_t NextStarValue = THRUSTER_NEUTRAL;
+int32_t PortTarget = THRUSTER_NEUTRAL;
+int32_t StarTarget = THRUSTER_NEUTRAL;
+int32_t NextPortValue = THRUSTER_NEUTRAL;
+int32_t NextStarValue = THRUSTER_NEUTRAL;
 uint8_t CalculateNext = FALSE;
 
 //attach serial to D0 (Rx) and D1 (tx)
@@ -81,7 +70,169 @@ STATE_TYPE state = STOP;
 int standby_flag = 0;
 int start_flag = 0;
 
+// System Configuration Variables
+static int SysForwardPowerPercentage = 100;
+static int SysReversePowerPercentage = 100;
+static int SysForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * SysForwardPowerPercentage / 100;
+static int SysReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * SysReversePowerPercentage / 100;
+static int SysThrusterUpdateTime = THRUSTER_UPDATE_TIME;
+static int SysThrusterUpdateInterval = THRUSTER_UPDATE_MAX_INTERVAL;
+static int SysStaleDataTimeout = STALE_DATA_TIMEOUT;
+static int SysSigPowerMax = SIG_POWER_MAX;
+static int SysSigPowerMin = SIG_POWER_MIN;
+static int SysAngleWide = ANGLE_WIDE;
+static int SysAngleTight = ANGLE_TIGHT;
 
+// Swappable function pointers
+static int32_t (*process_data)(int32_t, int32_t, int32_t, uint8_t); // preprocessing on data
+static void (*move_boat)(int32_t); // movement control algorithm
+
+///////////////////////////////////////////////////////////////////////////////
+///                          Movement Modes
+///////////////////////////////////////////////////////////////////////////////
+void pivot_cw(int32_t doa)
+{
+  PortTarget = SysForwardPowerLimit;
+  StarTarget = SysReversePowerLimit;
+  dbprint("Pivot CW => ");
+}
+
+void pivot_ccw(int32_t doa)
+{
+  PortTarget = SysReversePowerLimit;
+  StarTarget = SysForwardPowerLimit;
+  dbprint("Pivot CCW => ");
+}
+
+void pivot_proportional(int32_t doa)
+{
+  // may want to use some other variables than SysForwardPowerLimit and reverse limit
+
+  int error = abs(DEAD_AHEAD - (int)doa);
+
+  if (doa >= DEAD_AHEAD)
+  {
+    // may have these backwards
+    PortTarget = THRUSTER_NEUTRAL + error * (SysForwardPowerLimit - THRUSTER_NEUTRAL) / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL - error * (THRUSTER_NEUTRAL - SysReversePowerLimit) / DEAD_AHEAD;
+  }
+  else
+  {
+    PortTarget = THRUSTER_NEUTRAL - error * (THRUSTER_NEUTRAL - SysReversePowerLimit) / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL + error * (SysForwardPowerLimit - THRUSTER_NEUTRAL) / DEAD_AHEAD;
+  }
+  //dbprint("Pivot Proportional => ");
+}
+
+void pivot_quadratic(int32_t doa)
+{
+  // may want to use some other variables than SysForwardPowerLimit and reverse limit
+
+  if (doa >= DEAD_AHEAD)
+  {
+    // may have these backwards
+    PortTarget = THRUSTER_NEUTRAL + 
+                (doa - DEAD_AHEAD) * (SysForwardPowerLimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / THRUSTER_RANGE + 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (SysForwardPowerLimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL - 
+                (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - SysReversePowerLimit) / DEAD_AHEAD / THRUSTER_RANGE - 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - SysReversePowerLimit) / DEAD_AHEAD / DEAD_AHEAD;
+  }
+  else
+  {
+    PortTarget = THRUSTER_NEUTRAL - 
+                (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - SysReversePowerLimit) / DEAD_AHEAD / THRUSTER_RANGE - 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - SysReversePowerLimit) / DEAD_AHEAD / DEAD_AHEAD;
+    StarTarget = THRUSTER_NEUTRAL + 
+                (doa - DEAD_AHEAD) * (SysForwardPowerLimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / THRUSTER_RANGE + 
+                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (SysForwardPowerLimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / DEAD_AHEAD;
+  }
+  dbprint("Pivot Quadratic => ");
+}
+
+void pivot_exponential(int32_t doa)
+{
+  uint8_t exp = 3; // make parameter
+  int32_t offset;
+
+  offset = THRUSTER_RANGE * pow(((double)doa - DEAD_AHEAD) / DEAD_AHEAD, exp);
+
+  if (doa >= DEAD_AHEAD)
+  {
+    // may have these backwards
+    PortTarget = THRUSTER_NEUTRAL + offset;
+    StarTarget = THRUSTER_NEUTRAL - offset;
+  }
+  else
+  {
+    PortTarget = THRUSTER_NEUTRAL - offset;
+    StarTarget = THRUSTER_NEUTRAL + offset;
+  }
+  dbprint("Pivot Exponential => ");
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///                      Preprocessing Functions
+///////////////////////////////////////////////////////////////////////////////
+int32_t single_doa(int32_t doa, int32_t conf, int32_t power, uint8_t reset)
+{
+  return doa;
+}
+
+int32_t window_doa(int32_t doa, int32_t conf, int32_t power, uint8_t reset)
+{
+  static const uint8_t window_size = 8;
+  static int32_t window[window_size] = {DEAD_AHEAD};
+  static uint8_t num_samples = 0;
+  static uint8_t filled_window = FALSE;
+
+  // reset when changing preprocessing method
+  if (reset)
+  {
+    for (int i = 0; i < window_size; i++)
+    {
+      window[i] = DEAD_AHEAD;
+    }
+    filled_window = FALSE;
+    return -1; // return value should indicate invalid doa
+  }
+
+  // add new entry
+  window[num_samples++ % window_size] = doa;
+
+  if (num_samples >= window_size)
+  {
+    filled_window = TRUE;
+  }
+
+  if (!filled_window)
+  {
+    return -1; 
+  }
+
+  int32_t sum = 0;
+  for(int i = 0; i < window_size; i++)
+  {
+    sum += window[i];
+  }
+
+  return sum / window_size;
+}
+
+static int32_t (*preprocessors[2])(int32_t, int32_t, int32_t, uint8_t) = 
+{
+  single_doa,
+  window_doa
+};
+
+void (*move_modes[5])(int32_t) =
+{
+  pivot_cw,
+  pivot_ccw,
+  pivot_proportional,
+  pivot_quadratic,
+  pivot_exponential
+};
 
 void setup() {
   Serial.begin(115200); // PC
@@ -123,6 +274,9 @@ void setup() {
   stale_data_timer->setOverflow(STALE_DATA_TIMEOUT, MICROSEC_FORMAT);
   stale_data_timer->attachInterrupt(stale_data);
   
+  process_data = single_doa;
+  move_boat = pivot_proportional;
+
   dbprintln("Setup Complete");
 
 }
@@ -139,18 +293,10 @@ void loop() {
   static uint8_t NewPiData = FALSE;
 
   static int32_t power = 0; 
-  static uint32_t doa = 0;
-  static uint32_t conf = 0;  
-  static uint32_t processed_doa = DEAD_AHEAD;
+  static int32_t doa = 0;
+  static int32_t conf = 0;  
+  static int32_t processed_doa = DEAD_AHEAD;
   static uint8_t filled_window;
-
-  static int ForwardPowerPercentage = 100;
-  static int ReversePowerPercentage = 100;
-  static int ForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * ForwardPowerPercentage / 100;
-  static int ReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * ReversePowerPercentage / 100;
-
-  static uint32_t (*process_data)(uint32_t, uint32_t, int32_t, uint8_t) = single_doa; // preprocessing on data
-  static void (*move_boat)(uint32_t, int, int) = pivot_proportional; // movement control algorithm
 
   int status = 0;
 
@@ -174,7 +320,7 @@ void loop() {
   }
 
   if (CalculateNext) {
-    next_thruster_values(ForwardPowerLimit, ReversePowerLimit);
+    next_thruster_values();
     CalculateNext = FALSE;    
   }
 
@@ -187,15 +333,15 @@ void loop() {
         break;
       }
 
-      if(power > PWR_THRESH_MAX) // close to target
+      if(power > SysSigPowerMax) // close to target
       {
         state = STOP;
         break;
       }
-      else if(power < PWR_THRESH_MIN) // beacon off
-      {
-        break;
-      }
+      // else if(power < POWER_MIN) // beacon off
+      // {
+      //   break;
+      // }
       else // new data to process
       {
         stale_data_timer->pause();
@@ -205,8 +351,8 @@ void loop() {
         processed_doa = process_data(doa, conf, power, FALSE);
         if (processed_doa >= 0 && processed_doa < 360)
         {
-          move_boat(processed_doa, ForwardPowerLimit, ReversePowerLimit);
-          Serial.printf("P: %d   S: %d\n", PortTarget, StarTarget);
+          move_boat(processed_doa);
+          //Serial.printf("P: %d   S: %d\n", PortTarget, StarTarget);
         }
       }
 
@@ -215,6 +361,10 @@ void loop() {
     case STOP:
       StarTarget = THRUSTER_NEUTRAL;
       PortTarget = THRUSTER_NEUTRAL;
+      if (NewPiData && power < SysSigPowerMax)
+      {
+        state = GO;
+      }
     break;
 
     default:
@@ -222,278 +372,121 @@ void loop() {
   } 
 }
 
-void config_system(uint32_t opcode, uint32_t arg1, int32_t arg2, int status)
+void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
 {
+  dbprintln("Config Change");
+  Serial.printf("status:%i OP:%i arg1:%i arg2:%i\n", status, opcode, arg1, arg2);
   switch (status)
   {
     case 1: // no arg1 or arg2
-
 
     break;
     case 2: // arg1
       switch(opcode)
       {
         case 400:
-          
+          if (arg1 >= 0 && arg1 <= 100)
+          {
+            SysForwardPowerPercentage = arg1;
+            SysForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * SysForwardPowerPercentage / 100;  
+          }
         break;
-
+        case 401:
+          if (arg1 >= 0 && arg1 <= 100)
+          {
+            SysReversePowerPercentage = arg1;
+            SysReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * SysReversePowerPercentage / 100;
+          }
+        break;
+        case 402:
+          if (arg1 >= 1500 && arg1 <= 2000)
+            SysForwardPowerLimit = arg1;
+        break;
+        case 403:
+          if (arg1 >= 1000 && arg1 <= 1500)
+            SysReversePowerLimit = arg1;
+        break;
+        case 404:
+          if (arg1 > 1000)
+          {
+            SysThrusterUpdateTime = arg1;
+            update_thrusters_timer->pause();
+            update_thrusters_timer->setOverflow(SysThrusterUpdateTime, MICROSEC_FORMAT);
+            update_thrusters_timer->resume();
+          }
+        break;
+        case 405:
+          if (arg1 > 1)
+            SysThrusterUpdateInterval = arg1;
+        break;
+        case 406:
+          // stale data timeout
+        break;
+        case 407:
+          SysSigPowerMax = arg1;
+        break;
+        case 408:
+          SysSigPowerMin = arg1;
+        break;
+        case 409:
+          if (arg1 >= 0 && arg1 <= 180)
+            SysAngleWide = arg1;
+        break;
+        case 410:
+          if (arg1 >= 0 && arg1 <= 180)
+            SysAngleTight = arg1;
+        break;
+        case 500:
+          if (arg1 >= 0 && arg1 <= 1)
+            process_data = preprocessors[arg1];
+        break;
+        case 501:
+          if (arg1 >= 0 && arg1 <= 4)
+            move_boat = move_modes[arg1];
+        default:
+        break;
       }
 
     break;
 
     case 3: // arg1 and arg2
       
-
     break;
 
     default:
     break;
-  }
-  
+  } 
 }
 
-///////////////////////////////////////////////////////////////////////////////
-///                          Movement Modes
-///////////////////////////////////////////////////////////////////////////////
-void pivot_cw(uint32_t doa, int forwardlimit, int reverselimit)
-{
-  PortTarget = forwardlimit;
-  StarTarget = reverselimit;
-  dbprint("Pivot CW => ");
-}
-
-void pivot_ccw(uint32_t doa, int forwardlimit, int reverselimit)
-{
-  PortTarget = reverselimit;
-  StarTarget = forwardlimit;
-  dbprint("Pivot CCW => ");
-}
-
-void pivot_proportional(uint32_t doa, int forwardlimit, int reverselimit)
-{
-  // may want to use some other variables than forwardlimit and reverse limit
-
-  if (doa >= DEAD_AHEAD)
-  {
-    // may have these backwards
-    PortTarget = THRUSTER_NEUTRAL + (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD;
-    StarTarget = THRUSTER_NEUTRAL - (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD;
-  }
-  else
-  {
-    PortTarget = THRUSTER_NEUTRAL - (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD;
-    StarTarget = THRUSTER_NEUTRAL + (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD;
-  }
-  dbprint("Pivot Proportional => ");
-}
-
-void pivot_quadratic(uint32_t doa, int forwardlimit, int reverselimit)
-{
-  // may want to use some other variables than forwardlimit and reverse limit
-
-  if (doa >= DEAD_AHEAD)
-  {
-    // may have these backwards
-    PortTarget = THRUSTER_NEUTRAL + 
-                (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / THRUSTER_RANGE + 
-                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / DEAD_AHEAD;
-    StarTarget = THRUSTER_NEUTRAL - 
-                (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / THRUSTER_RANGE - 
-                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / DEAD_AHEAD;
-  }
-  else
-  {
-    PortTarget = THRUSTER_NEUTRAL - 
-                (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / THRUSTER_RANGE - 
-                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (THRUSTER_NEUTRAL - reverselimit) / DEAD_AHEAD / DEAD_AHEAD;
-    StarTarget = THRUSTER_NEUTRAL + 
-                (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / THRUSTER_RANGE + 
-                (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (doa - DEAD_AHEAD) * (forwardlimit - THRUSTER_NEUTRAL) / DEAD_AHEAD / DEAD_AHEAD;
-  }
-  dbprint("Pivot Proportional => ");
-}
-
-void pivot_exponential(uint32_t doa, int forwardlimit, int reverselimit)
-{
-  uint8_t exp = 3; // make parameter
-  uint32_t offset;
-
-  offset = THRUSTER_RANGE * pow(((double)doa - DEAD_AHEAD) / DEAD_AHEAD, exp);
-
-  if (doa >= DEAD_AHEAD)
-  {
-    // may have these backwards
-    PortTarget = THRUSTER_NEUTRAL + offset;
-    StarTarget = THRUSTER_NEUTRAL - offset;
-  }
-  else
-  {
-    PortTarget = THRUSTER_NEUTRAL - offset;
-    StarTarget = THRUSTER_NEUTRAL + offset;
-  }
-  dbprint("Pivot Exponential => ");
-}
-
-static void (*move_boat[])(uint32_t, int, int) 
-{
-  pivot_cw,
-  pivot_ccw,
-  pivot_proportional,
-  pivot_quadratic,
-  pivot_exponential
-};
-
-// void pwm_calc(uint32_t doa)
-// {
-//   //variables for calculating proportional speed
-//   int error = 0;
-//   int calc_speed = 0;
-//   uint32_t pwm_value = 0;
-  
-//   //remap doa angle so 45 = 0
-//   int angle = doa - 45;
-//   //check if the angle is negative, offset if it is
-
-//   if(angle < 0)
-//   {
-//     angle += 360;
-//   }
-
-//   //Check if boat needs to turn right or left
-//   if((RIGHT_MIN <= angle) && (angle <= RIGHT_MAX))  //turn right
-//   {
-//     //calculate the error
-//     error = angle;
-
-//     //get the proportional speed
-//     calc_speed = proportional_calc(error);
-
-//     //damping the power on an exponential curve
-//     //TODO: either take out or change calculation
-//     //calc_speed = sqrt(calc_speed);  
-
-//     //remap power level to pwm duty cycle range (60 - 80)
-//     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
-  
-//     //change PWM values
-//     update_thrusters(pwm_value,PWM_MAX_FW); //TODO: check if right motor should be dampened
-
-//   }  
-//   else if((LEFT_MIN <= angle) && (angle <= LEFT_MAX)) //turn left
-//   {
-//     //compute error
-//     error = LEFT_MAX - angle;
-    
-//     //get the calculated speed vvalue
-//     calc_speed = proportional_calc(error);
-
-//     //damping the power on an exponential curve
-//     //TODO: either take out or change calculation
-//     //calc_speed = sqrt(calc_speed); 
-
-//     //remap power level to pwm duty cycle range (60 - 80)
-//     pwm_value = map(calc_speed, 0, 100, PWM_STOP, PWM_MAX_FW);
-  
-//     //change duty cycles of the left and right motor
-//     update_thrusters(PWM_MAX_FW, pwm_value);  //TODO: check if left value needs to be dampened
-
-//   }
-//   else if((angle < RIGHT_MIN) && (angle > LEFT_MIN))//edge case where boat is backwards
-//   {
-//     //change right motor to full power and left motor off
-//     update_thrusters(PWM_STOP, PWM_MAX_FW);     
-//   }
-//   else //boat is headed within the right direction keep moving forward
-//   {
-//     update_thrusters(PWM_MAX_FW,PWM_MAX_FW);  
-//   }
-// }
-
-
-///////////////////////////////////////////////////////////////////////////////
-///                      Preprocessing Functions
-///////////////////////////////////////////////////////////////////////////////
-uint32_t single_doa(uint32_t doa, uint32_t conf, int32_t power, uint8_t reset)
-{
-  return doa;
-}
-
-uint32_t window_doa(uint32_t doa, uint32_t conf, int32_t power, uint8_t reset)
-{
-  static const uint8_t window_size = 8;
-  static uint32_t window[window_size] = {DEAD_AHEAD};
-  static uint8_t num_samples = 0;
-  static uint8_t filled_window = FALSE;
-
-  // reset when changing preprocessing method
-  if (reset)
-  {
-    for (int i = 0; i < window_size; i++)
-    {
-      window[i] = DEAD_AHEAD;
-    }
-    filled_window = FALSE;
-    return -1; // return value should indicate invalid doa
-  }
-
-  // add new entry
-  window[num_samples++ % window_size] = doa;
-
-  if (num_samples >= window_size)
-  {
-    filled_window = TRUE;
-  }
-
-  if (!filled_window)
-  {
-    return -1; 
-  }
-
-  uint32_t sum = 0;
-  for(int i = 0; i < window_size; i++)
-  {
-    sum += window[i];
-  }
-
-  return sum / window_size;
-}
-
-uint32_t (*preprocessors[])(uint32_t, uint32_t, int32_t, uint8_t) = 
-{
-  single_doa,
-  window_doa
-};
 
 ///////////////////////////////////////////////////////////////////////////////
 ///             Periodic Thruster Updating Functions
 ///////////////////////////////////////////////////////////////////////////////
-void next_thruster_values(int ForwardPowerLimit, int ReversePowerLimit) {
+void next_thruster_values() {
 
     int currPortCC = port_timer->getCaptureCompare(port_channel, MICROSEC_COMPARE_FORMAT)+1; // +1 bc setting CCreg is one less than requested.
     int currStarCC = star_timer->getCaptureCompare(star_channel, MICROSEC_COMPARE_FORMAT)+1;
-    int change = min(abs((int)PortTarget - currPortCC), THRUSTER_UPDATE_MAX_INTERVAL);
+    int change = min(abs((int)PortTarget - currPortCC), SysThrusterUpdateInterval);
     
     if (PortTarget > currPortCC) {
-      NextPortValue = min(ForwardPowerLimit, currPortCC + change);
+      NextPortValue = min(SysForwardPowerLimit, currPortCC + change);
     }
     else {
-      NextPortValue = max(ReversePowerLimit, currPortCC - change);
+      NextPortValue = max(SysReversePowerLimit, currPortCC - change);
     }
 
-    change = min(abs((int)StarTarget - currStarCC), THRUSTER_UPDATE_MAX_INTERVAL);
+    change = min(abs((int)StarTarget - currStarCC), SysThrusterUpdateInterval);
     
     if (StarTarget > currStarCC) {
-      NextStarValue = min(ForwardPowerLimit, currStarCC + change);
+      NextStarValue = min(SysForwardPowerLimit, currStarCC + change);
     }
     else {
-      NextStarValue = max(ReversePowerLimit, currStarCC - change);
+      NextStarValue = max(SysReversePowerLimit, currStarCC - change);
     }
 
 }
 
 void thruster_init() {
-
-  dbprintln("Initializing Thrusters");
 
   // turn on relay
   digitalWrite(MOTOR_PIN, 1);
@@ -520,6 +513,8 @@ void thruster_init() {
   NextStarValue = THRUSTER_NEUTRAL;
 
   update_thrusters_timer->resume();
+
+  dbprintln("Initialized Thrusters");
 }
 
 void thruster_stop()
@@ -536,8 +531,6 @@ void stale_data()
 {
   state = STOP;
 }
-
-
 
 void update_thrusters() {
 
@@ -564,25 +557,6 @@ void checkPiSerial(char recv_data[], uint8_t *msglen, uint8_t *flag) {
   {
     *flag = TRUE;
   }
-}
-
-/*
-* Takes in the doa error and then multiples it by the proportional constant.
-* once done it will map the speed to 0-100 range.
-*/
-uint32_t proportional_calc(int error)
-{
-  uint32_t calc_speed;
-  calc_speed = error * P_K;    
-
-  if(calc_speed > 170)
-  {
-    calc_speed = 170;
-  }
-  //remap to power damping range (0 - 100)
-  calc_speed = map(calc_speed, ERROR_MIN, ERROR_MAX, 0, 100);
-
-  return calc_speed;
 }
 
 /*
