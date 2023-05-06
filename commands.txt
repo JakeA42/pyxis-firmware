@@ -1,0 +1,143 @@
+void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
+{
+  switch (status)
+  {
+    case 1: // no arg1 or arg2
+      switch(opcode)
+      {
+        case 400:
+          move_boat = move_stop;
+          dbprintln("Move Mode: Stop");
+        break;
+        case 401:
+          move_boat = auto_forward;
+          dbprintln("Move Mode: Auto");
+        break;
+        case 402:
+          move_boat = move_manual;
+          dbprintln("Move Mode: Manual");
+        break;
+        case 410:
+          process_data = single_doa;
+          dbprintln("Process Mode: Single");
+        break;
+        case 411:
+          process_data = window_doa;
+          dbprintln("Process Mode: Window");
+        break;
+        default:
+        break;
+      }
+    break;
+    case 2: // arg1
+      switch(opcode)
+      {
+        case 500:
+          if (arg1 >= 0 && arg1 <= 100)
+          {
+            SysForwardPowerPercentage = arg1;
+            SysForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * SysForwardPowerPercentage / 100;
+            printf("Change F Pow"); 
+          }
+        break;
+        case 501:
+          if (arg1 >= 0 && arg1 <= 100)
+          {
+            SysReversePowerPercentage = arg1;
+            SysReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * SysReversePowerPercentage / 100;
+          }
+        break;
+        case 502:
+          if (arg1 >= 1500 && arg1 <= 2000)
+            SysForwardPowerLimit = arg1;
+        break;
+        case 503:
+          if (arg1 >= 1000 && arg1 <= 1500)
+            SysReversePowerLimit = arg1;
+        break;
+        case 504:
+          if (arg1 > 1000)
+          {
+            SysThrusterUpdateTime = arg1;
+            update_thrusters_timer->pause();
+            update_thrusters_timer->setOverflow(SysThrusterUpdateTime, MICROSEC_FORMAT);
+            update_thrusters_timer->resume();
+          }
+        break;
+        case 505:
+          if (arg1 > 1)
+            SysThrusterUpdateInterval = arg1;
+        break;
+        case 506:
+          // stale data timeout
+        break;
+        case 507:
+          SysSigPowerMax = arg1;
+        break;
+        case 508:
+          SysSigPowerMin = arg1;
+        break;
+        case 509:
+          if (arg1 >= 0 && arg1 <= 180)
+          {
+            SysAngleWide = arg1;
+          }
+        break;
+        case 510:
+          if (arg1 >= 0 && arg1 <= 180)
+          {
+            SysAngleTight = arg1;
+          }
+        break;
+        case 511:
+          if (arg1 >= 0 && arg1 <= 500)
+          {
+            SysForwardOffset = arg1;
+          }
+          break;
+        case 512:
+          if (arg1 >= 1 && arg1 <= 10)
+          {
+            SysOrder = arg1;
+          }
+          break;
+        case 513:
+          SysDoaOffset = arg1;
+          Serial.printf("DOA Offset = %d", SysDoaOffset);
+        break;
+        case 514:
+          if (arg1 == 0 || arg1 == 1)
+          {
+            SysReflect = arg1;
+          }
+        case 515:
+          if (arg1 >= 0 && arg1 <= 3)
+            move_boat = move_modes[arg1];
+        default:
+        break;
+      }
+    break;
+
+    case 3: // arg1 and arg2
+      switch(opcode)
+      {
+        case 600:
+          SysManualPort = arg1;
+          SysManualStar = arg2;
+          printf("Manual Port=%i Star=%i\n", SysManualPort, SysManualStar);
+        break;
+        case 601:
+          SysPivotFWValue = arg1;
+          SysPivotRVValue = arg2;
+          printf("Pivot Port=%i Star=%i\n", SysPivotFWValue, SysPivotRVValue);
+        break;
+        default:
+        break;
+      }
+
+    break;
+
+    default:
+    break;
+  } 
+}
