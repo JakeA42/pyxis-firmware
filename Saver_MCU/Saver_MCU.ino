@@ -32,13 +32,18 @@
 
 #define STALE_DATA_TIMEOUT 2000000 //microsec
 
-#define DEBUGGING TRUE
-
 typedef enum STATE_TYPE
 {
   GO,
   STOP,
 }STATE_TYPE;
+
+typedef enum AUTO_STATE
+{
+  CW,
+  CCW,
+  FORWARD
+}AUTO_STATE;
 
 //stuff needed for timers to do PWM
 TIM_TypeDef *tim1 = (TIM_TypeDef *)pinmap_peripheral(digitalPinToPinName(PORT_PIN), PinMap_PWM);  //TIM4 channel 3
@@ -71,12 +76,12 @@ int standby_flag = 0;
 int start_flag = 0;
 
 // System Configuration Variables
-static int SysForwardPowerPercentage = 20;
-static int SysReversePowerPercentage = 20;
+static int SysForwardPowerPercentage = 40;
+static int SysReversePowerPercentage = 40;
 static int SysForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * SysForwardPowerPercentage / 100;
 static int SysReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * SysReversePowerPercentage / 100;
-static int SysPivotFWValue = 1600;
-static int SysPivotRVValue = 1400;
+static int SysPivotFWValue = 1550;
+static int SysPivotRVValue = 1450;
 static int SysManualPort = THRUSTER_NEUTRAL;
 static int SysManualStar = THRUSTER_NEUTRAL;
 static int SysThrusterUpdateTime = THRUSTER_UPDATE_TIME;
@@ -99,85 +104,163 @@ static void (*move_boat)(int32_t); // movement control algorithm
 ///                          Movement Modes
 ///////////////////////////////////////////////////////////////////////////////
 
-void move_stop(int32_t doa)
+void auto_stop(int32_t doa)
 {
-  PortTarget = THRUSTER_NEUTRAL;
-  StarTarget = THRUSTER_NEUTRAL;
+  // Don't set target thruster values. Would override manual.
+  Serial.printf("STOP:\tPort=%i   Star=%i\n", PortTarget, StarTarget);
 }
 
-void pivot_cw(int32_t doa)
+// void pivot_cw(int32_t doa)
+// {
+//   if (doa > DEAD_AHEAD - SysAngleTight && doa < DEAD_AHEAD + SysAngleTight)
+//   {
+//     PortTarget = THRUSTER_NEUTRAL;
+//     StarTarget = THRUSTER_NEUTRAL;
+//     move_boat = auto_forward;
+//   }
+//   else
+//   {
+//     PortTarget = SysPivotFWValue;
+//     StarTarget = SysPivotRVValue;
+//   }
+//   Serial.print("Pivot CW => ");
+// }
+
+// void pivot_ccw(int32_t doa)
+// {
+//   if (doa > DEAD_AHEAD - SysAngleTight && doa < DEAD_AHEAD + SysAngleTight)
+//   {
+//     PortTarget = THRUSTER_NEUTRAL;
+//     StarTarget = THRUSTER_NEUTRAL;
+//     move_boat = auto_forward;
+//   }
+//   else
+//   {
+//     PortTarget = SysPivotRVValue;
+//     StarTarget = SysPivotFWValue;
+//   }
+//   Serial.print("Pivot CCW => ");
+// }
+
+void move_auto(int32_t doa)
 {
-  if (doa > DEAD_AHEAD - SysAngleTight && doa < DEAD_AHEAD + SysAngleTight)
+  static AUTO_STATE mode = FORWARD;
+
+  switch (mode)
   {
-    PortTarget = THRUSTER_NEUTRAL;
-    StarTarget = THRUSTER_NEUTRAL;
-    move_boat = auto_forward;
+    case FORWARD:
+      if (doa >= 0 && doa < DEAD_AHEAD - SysAngleWide)
+      {
+        mode = CW;
+        Serial.println("Auto mode to CW");
+      }
+      if (doa > DEAD_AHEAD + SysAngleWide && doa < 360)
+      {
+        mode = CCW;
+        Serial.println("Auto mode to CCW");
+      }
+    break;
+
+    case CW: // same region as CCW
+      if (doa > DEAD_AHEAD - SysAngleTight && doa < DEAD_AHEAD + SysAngleTight)
+      {
+        mode = FORWARD;
+        Serial.println("Auto mode to FORWARD");
+      }
+    break;
+
+    case CCW: // same region as CW
+      if (doa > DEAD_AHEAD - SysAngleTight && doa < DEAD_AHEAD + SysAngleTight)
+      {
+        mode = FORWARD;
+        Serial.println("Auto mode to FORWARD");
+      }
+    break;
+
+    default:
+      Serial.println("Error: invalid auto mode state 1");
+    break;
   }
-  else
+
+  switch(mode)
   {
-    PortTarget = SysPivotFWValue;
-    StarTarget = SysPivotRVValue;
+    case FORWARD:
+      int32_t offset;
+      offset = THRUSTER_RANGE * pow((abs((double)doa - DEAD_AHEAD)) / DEAD_AHEAD, SysOrder);
+      
+      if (doa >= DEAD_AHEAD)
+      {
+        // may have these backwards
+        PortTarget = THRUSTER_NEUTRAL + SysForwardOffset + offset;
+        StarTarget = THRUSTER_NEUTRAL + SysForwardOffset - offset;
+      }
+      else
+      {
+        PortTarget = THRUSTER_NEUTRAL + SysForwardOffset - offset;
+        StarTarget = THRUSTER_NEUTRAL + SysForwardOffset + offset;
+      }
+      Serial.printf("FORWARD:\tPort=%i  Star=%i\n", PortTarget, StarTarget);
+    break;
+
+    case CW:
+      PortTarget = SysPivotFWValue;
+      StarTarget = SysPivotRVValue;
+      Serial.printf("CW:\tPort=%i  Star=%i\n", PortTarget, StarTarget);
+    break;
+
+    case CCW:
+      PortTarget = SysPivotRVValue;
+      StarTarget = SysPivotFWValue;
+      Serial.printf("CW:\tPort=%i  Star=%i\n", PortTarget, StarTarget);
+    break;
+
+    default:
+      Serial.println("Error: invalid auto mode state 2");
+    break;
   }
-  dbprint("Pivot CW => ");
 }
 
-void pivot_ccw(int32_t doa)
-{
-  if (doa > DEAD_AHEAD - SysAngleTight && doa < DEAD_AHEAD + SysAngleTight)
-  {
-    PortTarget = THRUSTER_NEUTRAL;
-    StarTarget = THRUSTER_NEUTRAL;
-    move_boat = auto_forward;
-  }
-  else
-  {
-    PortTarget = SysPivotRVValue;
-    StarTarget = SysPivotFWValue;
-  }
-  dbprint("Pivot CCW => ");
-}
+// void auto_forward(int32_t doa)
+// {
 
-void auto_forward(int32_t doa)
-{
+//   int32_t offset;
 
-  int32_t offset;
+//   if (doa < DEAD_AHEAD - SysAngleWide)
+//   {
+//     PortTarget = THRUSTER_NEUTRAL;
+//     StarTarget = THRUSTER_NEUTRAL;
+//     move_boat = pivot_cw;
+//     return;
+//   }
+//   if (doa > DEAD_AHEAD + SysAngleWide)
+//   {
+//     PortTarget = THRUSTER_NEUTRAL;
+//     StarTarget = THRUSTER_NEUTRAL;
+//     move_boat = pivot_cw;
+//   }
 
-  if (doa < DEAD_AHEAD - SysAngleWide)
-  {
-    PortTarget = THRUSTER_NEUTRAL;
-    StarTarget = THRUSTER_NEUTRAL;
-    move_boat = pivot_cw;
-    return;
-  }
-  if (doa > DEAD_AHEAD + SysAngleWide)
-  {
-    PortTarget = THRUSTER_NEUTRAL;
-    StarTarget = THRUSTER_NEUTRAL;
-    move_boat = pivot_cw;
-  }
+//   offset = THRUSTER_RANGE * pow((abs((double)doa - DEAD_AHEAD)) / DEAD_AHEAD, SysOrder);
 
-  offset = THRUSTER_RANGE * pow((abs((double)doa - DEAD_AHEAD)) / DEAD_AHEAD, SysOrder);
+//   if (doa >= DEAD_AHEAD)
+//   {
+//     // may have these backwards
+//     PortTarget = THRUSTER_NEUTRAL + SysForwardOffset + offset;
+//     StarTarget = THRUSTER_NEUTRAL + SysForwardOffset - offset;
+//   }
+//   else
+//   {
+//     PortTarget = THRUSTER_NEUTRAL + SysForwardOffset - offset;
+//     StarTarget = THRUSTER_NEUTRAL + SysForwardOffset + offset;
+//   }
+//   Serial.print("Move forward => ");
+// }
 
-  if (doa >= DEAD_AHEAD)
-  {
-    // may have these backwards
-    PortTarget = THRUSTER_NEUTRAL + SysForwardOffset + offset;
-    StarTarget = THRUSTER_NEUTRAL + SysForwardOffset - offset;
-  }
-  else
-  {
-    PortTarget = THRUSTER_NEUTRAL + SysForwardOffset - offset;
-    StarTarget = THRUSTER_NEUTRAL + SysForwardOffset + offset;
-  }
-  dbprint("Move forward => ");
-}
-
-void move_manual (int32_t)
-{
-  PortTarget = SysManualPort;
-  StarTarget = SysManualStar;
-  dbprint("manual move =>");
-}
+// void move_manual (int32_t)
+// {
+//   PortTarget = SysManualPort;
+//   StarTarget = SysManualStar;
+//   Serial.print("manual move =>");
+// }
 
 ///////////////////////////////////////////////////////////////////////////////
 ///                      Preprocessing Functions
@@ -185,7 +268,7 @@ void move_manual (int32_t)
 int32_t single_doa(int32_t doa, int32_t conf, int32_t power, uint8_t reset)
 {
   int result = abs(360*SysReflect - ((doa + SysDoaOffset) % 360));
-  Serial.printf("doa=%d offset=%d res=%d", doa, SysDoaOffset, result);
+  Serial.printf("res=%i, doa=%i, offset=%i, reflect=%i", result, doa, SysDoaOffset, SysReflect);
   return result;
 }
 
@@ -228,7 +311,7 @@ int32_t window_doa(int32_t doa, int32_t conf, int32_t power, uint8_t reset)
 
   int result = abs(360*SysReflect - (((sum / window_size) + SysDoaOffset) % 360));
 
-  Serial.printf("doa=%d,pow=%d  offset=%d %d\n", doa, power, SysDoaOffset, SysReflect);
+  Serial.printf("res=%i, doa=%i, pow=%i, offset=%i, reflect=%i\n", result, doa, power, SysDoaOffset, SysReflect);
 
   return result;
 }
@@ -239,13 +322,13 @@ static int32_t (*preprocessors[2])(int32_t, int32_t, int32_t, uint8_t) =
   window_doa
 };
 
-void (*move_modes[5])(int32_t) =
-{
-  pivot_cw,
-  pivot_ccw,
-  auto_forward,
-  move_manual  
-};
+// void (*move_modes[5])(int32_t) =
+// {
+//   pivot_cw,
+//   pivot_ccw,
+//   move_auto,
+//   move_manual  
+// };
 
 void setup() {
   Serial.begin(115200); // PC
@@ -287,10 +370,10 @@ void setup() {
   stale_data_timer->setOverflow(STALE_DATA_TIMEOUT, MICROSEC_FORMAT);
   stale_data_timer->attachInterrupt(stale_data);
   
-  process_data = single_doa;
-  move_boat = auto_forward;
+  process_data = window_doa;
+  move_boat = auto_stop;
 
-  dbprintln("Setup Complete2");
+  Serial.println("Setup Complete");
 
 }
 
@@ -347,11 +430,13 @@ void loop() {
 
       if(power > SysSigPowerMax) // close to target
       {
+        Serial.println("Stong signal. Stopping");
         state = STOP;
         break;
       }
       else if(power < SysSigPowerMin) // beacon off
       {
+        Serial.println("Weak signal. Ignoring");
         break;
       }
       else // new data to process
@@ -364,17 +449,16 @@ void loop() {
         if (processed_doa >= 0 && processed_doa < 360)
         {
           move_boat(processed_doa);
-          Serial.printf("P: %d   S: %d\n", PortTarget, StarTarget);
         }
       }
-
     break;
 
-    case STOP:
+    case STOP: // Separate stop mode for stale data?
       StarTarget = THRUSTER_NEUTRAL;
       PortTarget = THRUSTER_NEUTRAL;
       if (NewPiData && power < SysSigPowerMax)
       {
+        Serial.println("Out of target range. Moving");
         state = GO;
       }
     break;
@@ -384,6 +468,9 @@ void loop() {
   } 
 }
 
+///////////////////////////////////////////////////////////////////////////////
+///                       Configure System                                  ///
+///////////////////////////////////////////////////////////////////////////////
 void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
 {
   switch (status)
@@ -391,25 +478,56 @@ void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
     case 1: // no arg1 or arg2
       switch(opcode)
       {
-        case 400:
-          move_boat = move_stop;
-          dbprintln("Move Mode: Stop");
+        case 400: // stop
+          stale_data_timer->pause();
+          stale_data_timer->setCount(1);
+          PortTarget = THRUSTER_NEUTRAL;
+          StarTarget = THRUSTER_NEUTRAL;
+          move_boat = auto_stop;
+          Serial.println("Move Mode: Stop");
         break;
-        case 401:
-          move_boat = auto_forward;
-          dbprintln("Move Mode: Auto");
+
+        case 401: // autonomous
+          move_boat = move_auto;
+          stale_data_timer->resume();
+          Serial.println("Move Mode: Auto");
         break;
-        case 402:
-          move_boat = move_manual;
-          dbprintln("Move Mode: Manual");
+
+        case 402: // pivot cw
+          stale_data_timer->pause();
+          stale_data_timer->setCount(1);
+          PortTarget = SysPivotFWValue;
+          StarTarget = SysPivotRVValue;
+          move_boat = auto_stop;
+          Serial.println("Move Mode: Manual CW");
         break;
+
+        case 403: // pivot ccw
+          stale_data_timer->pause();
+          stale_data_timer->setCount(1);
+          PortTarget = SysPivotRVValue;
+          StarTarget = SysPivotFWValue;
+          move_boat = auto_stop;
+          Serial.println("Move Mode: Manual CCW");
+        break;
+
+        case 404: // forward
+          PortTarget = THRUSTER_NEUTRAL + SysForwardOffset;
+          StarTarget = THRUSTER_NEUTRAL + SysForwardOffset;
+          stale_data_timer->pause();
+          stale_data_timer->setCount(1);
+          move_boat = auto_stop;
+          Serial.println("Move Mode: Manual FORWARD");
+        break;
+
         case 410:
           process_data = single_doa;
-          dbprintln("Process Mode: Single");
+          Serial.println("Process Mode: Single");
         break;
+
         case 411:
           process_data = window_doa;
-          dbprintln("Process Mode: Window");
+          Serial.println("Process Mode: Window");
         break;
         default:
         break;
@@ -423,24 +541,35 @@ void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
           {
             SysForwardPowerPercentage = arg1;
             SysForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * SysForwardPowerPercentage / 100;
-            printf("Change F Pow"); 
+            Serial.printf("Forward thruster limit to %i%%\n",arg1); 
           }
         break;
+
         case 501:
           if (arg1 >= 0 && arg1 <= 100)
           {
             SysReversePowerPercentage = arg1;
             SysReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * SysReversePowerPercentage / 100;
+            Serial.printf("Reverse thruster limit to %i%%\n",arg1);
           }
         break;
+
         case 502:
           if (arg1 >= 1500 && arg1 <= 2000)
+          {
             SysForwardPowerLimit = arg1;
+            Serial.printf("Forward thruster limit to %i\n",arg1);
+          }
         break;
+
         case 503:
           if (arg1 >= 1000 && arg1 <= 1500)
+          {
             SysReversePowerLimit = arg1;
+            Serial.printf("Reverse thruster limit to %i\n",arg1);
+          }
         break;
+
         case 504:
           if (arg1 > 1000)
           {
@@ -448,57 +577,77 @@ void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
             update_thrusters_timer->pause();
             update_thrusters_timer->setOverflow(SysThrusterUpdateTime, MICROSEC_FORMAT);
             update_thrusters_timer->resume();
+            Serial.printf("Thruster update time to %i\n", arg1);
           }
         break;
+
         case 505:
           if (arg1 > 1)
+          {
             SysThrusterUpdateInterval = arg1;
+            Serial.printf("Thruster update interval (msec) to %i\n", arg1);
+          }
         break;
+
         case 506:
           // stale data timeout
         break;
+
         case 507:
           SysSigPowerMax = arg1;
+          Serial.printf("Recieved signal power upper threshold to %i\n", arg1);
         break;
+
         case 508:
           SysSigPowerMin = arg1;
+          Serial.printf("Recieved signal power lower threshold to %i\n", arg1);
         break;
+
         case 509:
-          if (arg1 >= 0 && arg1 <= 180)
+          if (arg1 >= 0 && arg1 <= DEAD_AHEAD)
           {
             SysAngleWide = arg1;
+            Serial.printf("Wide angle to %i\n", arg1);
           }
         break;
+
         case 510:
-          if (arg1 >= 0 && arg1 <= 180)
+          if (arg1 >= 0 && arg1 <= DEAD_AHEAD)
           {
             SysAngleTight = arg1;
+            Serial.printf("Tight angle to %i\n", arg1);
           }
         break;
+
         case 511:
-          if (arg1 >= 0 && arg1 <= 500)
+          if (arg1 >= 0 && arg1 <= THRUSTER_RANGE)
           {
             SysForwardOffset = arg1;
+            Serial.printf("Thruster forward offset to %i\n", arg1);
           }
-          break;
+        break;
+
         case 512:
           if (arg1 >= 1 && arg1 <= 10)
           {
             SysOrder = arg1;
+            Serial.printf("Forward mode function order to %i\n", arg1);
           }
-          break;
+        break;
+
         case 513:
           SysDoaOffset = arg1;
-          Serial.printf("DOA Offset = %d", SysDoaOffset);
+          Serial.printf("DOA Offset to %i", SysDoaOffset);
         break;
+
         case 514:
           if (arg1 == 0 || arg1 == 1)
           {
             SysReflect = arg1;
+            Serial.printf("DOA reflect to %i\n", arg1);
           }
-        case 515:
-          if (arg1 >= 0 && arg1 <= 3)
-            move_boat = move_modes[arg1];
+        break;
+
         default:
         break;
       }
@@ -507,16 +656,43 @@ void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
     case 3: // arg1 and arg2
       switch(opcode)
       {
-        case 600:
-          SysManualPort = arg1;
-          SysManualStar = arg2;
-          printf("Manual Port=%i Star=%i\n", SysManualPort, SysManualStar);
+        case 600: // manual drive
+          PortTarget = THRUSTER_NEUTRAL;
+          StarTarget = THRUSTER_NEUTRAL;
+          stale_data_timer->pause();
+          stale_data_timer->setCount(1);
+          move_boat = auto_stop;
+
+          if (arg1 >= THRUSTER_MAX_REVERSE && arg1 <= THRUSTER_MAX_FORWARD &&
+              arg2 >= THRUSTER_MAX_REVERSE && arg2 <= THRUSTER_MAX_FORWARD)
+          {
+            PortTarget = arg1;
+            StarTarget = arg2;
+          }
+          
+          Serial.printf("Manual Mode: Port=%i Star=%i\n", PortTarget, StarTarget);
         break;
+
         case 601:
-          SysPivotFWValue = arg1;
-          SysPivotRVValue = arg2;
-          printf("Pivot Port=%i Star=%i\n", SysPivotFWValue, SysPivotRVValue);
+          if (arg1 >= THRUSTER_NEUTRAL && arg1 <= THRUSTER_MAX_FORWARD &&
+              arg2 >= THRUSTER_MAX_REVERSE && arg2 <= THRUSTER_NEUTRAL)
+          {
+            SysPivotFWValue = arg1;
+            SysPivotRVValue = arg2;
+            Serial.printf("Set Pivot to FW=%i RV=%i\n", SysPivotFWValue, SysPivotRVValue);
+          }
         break;
+
+        case 602:
+          if (arg1 >= 0 && arg1 <= 100 &&
+              arg2 >= 0 && arg2 <= 100)
+          {
+            SysPivotFWValue = THRUSTER_NEUTRAL + THRUSTER_RANGE * arg1 / 100;
+            SysPivotRVValue = THRUSTER_NEUTRAL - THRUSTER_RANGE * arg2 / 100;
+            Serial.printf("Set Pivot to FW=%i(%i%%) RV=%i(%i%%)\n", SysPivotFWValue, arg1, SysPivotRVValue, arg2);
+          }
+        break;
+
         default:
         break;
       }
@@ -558,6 +734,8 @@ void next_thruster_values() {
 
 void thruster_init() {
 
+  update_thrusters_timer->pause();
+
   // turn on relay
   digitalWrite(MOTOR_PIN, 1);
 
@@ -584,7 +762,7 @@ void thruster_init() {
 
   update_thrusters_timer->resume();
 
-  dbprintln("Initialized Thrusters");
+  Serial.println("Initialized Thrusters");
 }
 
 void thruster_stop()
@@ -600,6 +778,7 @@ void thruster_stop()
 void stale_data()
 {
   state = STOP;
+  Serial.println("Stale data. Stopping");
 }
 
 void update_thrusters() {
@@ -641,12 +820,13 @@ void E_stop()
   //check if the stop flag is high
   if(stop_flag == FALSE)
   {
+    Serial.println("E-Stopped triggered");
+
     //if low then open relays and turn of motors
     thruster_stop();
 
     //make stop flag high
-    stop_flag = TRUE;
-    dbprintln("E-Stopped triggered");
+    stop_flag = TRUE; 
   }
   //if stop flag high, check re-start flag
   else if(re_start == FALSE)
@@ -656,12 +836,14 @@ void E_stop()
   }
   else if((stop_flag == TRUE) && (re_start == TRUE))
   {
+    Serial.println("E-Stop restart triggered");
+
     //re-initalize motors for use
     thruster_init();       
     //reset flags
     stop_flag = FALSE;
     re_start = FALSE;
-    dbprintln("E-Stop restart triggered");
+    
   }
 }
 
@@ -673,7 +855,7 @@ void Check_Switch()
   switchstate = digitalRead(SWITCH_PIN);
   if (switchstate == SWITCH_ON && oldswitchstate == SWITCH_OFF)
   {
-    dbprintln("Turned On");
+    Serial.println("Turned On");
 
     digitalWrite(PI_PIN,1); 
     digitalWrite(KRAKEN_PIN,1);
@@ -685,7 +867,7 @@ void Check_Switch()
   }
   else if (switchstate == SWITCH_OFF && oldswitchstate == SWITCH_ON)
   {
-    dbprintln("Turned Off");
+    Serial.println("Turned Off");
   
     digitalWrite(PI_PIN,0); // TODO: uncomment. commented for testing
     digitalWrite(KRAKEN_PIN,0); // TODO: uncomment. commented for testing
@@ -697,21 +879,6 @@ void Check_Switch()
   }
 }
 
-void dbprint(char *str)
-{
-  if (DEBUGGING)
-  {
-    Serial.print(str);
-  }
-}
-
-void dbprintln(char *str)
-{
-  if (DEBUGGING)
-  {
-    Serial.println(str);
-  }
-}
 
 
 
