@@ -4,8 +4,8 @@
 #define SIG_POWER_MIN   -600
 #define P_K             1 // delete
 #define DEAD_AHEAD      180
-#define ANGLE_WIDE      30
-#define ANGLE_TIGHT     15
+#define ANGLE_WIDE      10
+#define ANGLE_TIGHT     5
 
 #define PORT_PIN      D10
 #define STAR_PIN      D9
@@ -40,6 +40,7 @@ typedef enum STATE_TYPE
 
 typedef enum AUTO_STATE
 {
+  ASSESS,
   CW,
   CCW,
   FORWARD
@@ -80,10 +81,8 @@ static int SysForwardPowerPercentage = 40;
 static int SysReversePowerPercentage = 40;
 static int SysForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * SysForwardPowerPercentage / 100;
 static int SysReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * SysReversePowerPercentage / 100;
-static int SysPivotFWValue = 1550;
-static int SysPivotRVValue = 1450;
-static int SysManualPort = THRUSTER_NEUTRAL;
-static int SysManualStar = THRUSTER_NEUTRAL;
+static int SysPivotFWValue = 1515;
+static int SysPivotRVValue = 1485;
 static int SysThrusterUpdateTime = THRUSTER_UPDATE_TIME;
 static int SysThrusterUpdateInterval = THRUSTER_UPDATE_MAX_INTERVAL;
 static int SysStaleDataTimeout = STALE_DATA_TIMEOUT;
@@ -91,10 +90,13 @@ static int SysSigPowerMax = SIG_POWER_MAX;
 static int SysSigPowerMin = SIG_POWER_MIN;
 static int SysAngleWide = ANGLE_WIDE;
 static int SysAngleTight = ANGLE_TIGHT;
-static int SysForwardOffset = 50;
+static int SysForwardOffset = 40;
+static int SysForwardOffsetFar = 40;
+static int SysForwardOffsetNear = 20;
 static int SysOrder = 2;
 static int SysReflect = 1;
-static int SysDoaOffset = 225;
+static int SysDoaOffset = 0;
+static int SysSpeedChangePower = -300;
 
 // Swappable function pointers
 static int32_t (*process_data)(int32_t, int32_t, int32_t, uint8_t); // preprocessing on data
@@ -144,10 +146,28 @@ void auto_stop(int32_t doa)
 
 void move_auto(int32_t doa)
 {
-  static AUTO_STATE mode = FORWARD;
+  static AUTO_STATE mode = ASSESS;
 
   switch (mode)
   {
+    case ASSESS:
+      if (doa >= 0 && doa < DEAD_AHEAD - SysAngleTight)
+      {
+        mode = CW;
+        Serial.println("Assess: Auto mode to CW");
+      }
+      else if (doa > DEAD_AHEAD + SysAngleTight && doa < 360)
+      {
+        mode = CCW;
+        Serial.println("Assess: Auto mode to CCW");
+      }
+      else
+      {
+        mode = FORWARD;
+        Serial.println("Assess: Auto mode to FORWARD");
+      }
+    break;
+
     case FORWARD:
       if (doa >= 0 && doa < DEAD_AHEAD - SysAngleWide)
       {
@@ -214,6 +234,11 @@ void move_auto(int32_t doa)
       Serial.printf("CW:\tPort=%i  Star=%i\n", PortTarget, StarTarget);
     break;
 
+    case ASSESS: // shouldn't happen
+      PortTarget = THRUSTER_NEUTRAL;
+      StarTarget = THRUSTER_NEUTRAL;
+    break;
+
     default:
       Serial.println("Error: invalid auto mode state 2");
     break;
@@ -253,13 +278,6 @@ void move_auto(int32_t doa)
 //     StarTarget = THRUSTER_NEUTRAL + SysForwardOffset + offset;
 //   }
 //   Serial.print("Move forward => ");
-// }
-
-// void move_manual (int32_t)
-// {
-//   PortTarget = SysManualPort;
-//   StarTarget = SysManualStar;
-//   Serial.print("manual move =>");
 // }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -370,8 +388,8 @@ void setup() {
   stale_data_timer->setOverflow(STALE_DATA_TIMEOUT, MICROSEC_FORMAT);
   stale_data_timer->attachInterrupt(stale_data);
   
-  process_data = window_doa;
-  move_boat = auto_stop;
+  process_data = single_doa;
+  move_boat = move_auto;
 
   Serial.println("Setup Complete");
 
@@ -428,6 +446,7 @@ void loop() {
         break;
       }
 
+
       if(power > SysSigPowerMax) // close to target
       {
         Serial.println("Stong signal. Stopping");
@@ -444,6 +463,15 @@ void loop() {
         stale_data_timer->pause();
         stale_data_timer->setCount(1);
         stale_data_timer->resume();
+
+        if (power > SysSpeedChangePower)
+        {
+          SysForwardOffset = SysForwardOffsetNear;
+        }
+        else
+        {
+          SysForwardOffset = SysForwardOffsetFar;
+        }
 
         processed_doa = process_data(doa, conf, power, FALSE);
         if (processed_doa >= 0 && processed_doa < 360)
@@ -645,6 +673,30 @@ void config_system(int32_t opcode, int32_t arg1, int32_t arg2, int status)
           {
             SysReflect = arg1;
             Serial.printf("DOA reflect to %i\n", arg1);
+          }
+        break;
+
+        case 515:
+          if (arg1 >= SysSigPowerMin && arg1 <= SysSigPowerMin)
+          {
+            SysSpeedChangePower = arg1;
+            Serial.printf("Speed Change Power to %i\n", arg1);
+          }
+        break;
+
+        case 516:
+          if (arg1 >= 0 && arg1 <= 500)
+          {
+            SysForwardOffsetFar = arg1;
+            Serial.printf("Forward Offset Far to %i\n", arg1);
+          }
+        break;
+
+        case 517:
+          if (arg1 >= 0 && arg1 <= 500)
+          {
+            SysForwardOffsetNear = arg1;
+            Serial.printf("Forward Offset Near to %i\n", arg1);
           }
         break;
 
