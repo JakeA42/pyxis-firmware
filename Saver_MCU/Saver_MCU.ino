@@ -4,8 +4,8 @@
 #define SIG_POWER_MIN   -600
 #define P_K             1 // delete
 #define DEAD_AHEAD      180
-#define ANGLE_WIDE      90
-#define ANGLE_TIGHT     40
+#define ANGLE_WIDE      45
+#define ANGLE_TIGHT     15
 
 #define PORT_PIN      D10
 #define STAR_PIN      D9
@@ -90,9 +90,9 @@ static int SysSigPowerMax = SIG_POWER_MAX;
 static int SysSigPowerMin = SIG_POWER_MIN;
 static int SysAngleWide = ANGLE_WIDE;
 static int SysAngleTight = ANGLE_TIGHT;
-static int SysForwardOffset = 50;
-static int SysForwardOffsetFar = 50;
-static int SysForwardOffsetNear = 50;
+static int SysForwardOffset = 40;
+static int SysForwardOffsetFar = 40;
+static int SysForwardOffsetNear = 40;
 static int SysOrder = 4;
 static int SysReflect = 1;
 static int SysDoaOffset = 0;
@@ -292,7 +292,7 @@ int32_t single_doa(int32_t doa, int32_t conf, int32_t power, uint8_t reset)
 
 int32_t window_doa(int32_t doa, int32_t conf, int32_t power, uint8_t reset)
 {
-  static const uint8_t window_size = 8;
+  static const uint8_t window_size = 3;
   static int32_t window[window_size] = {DEAD_AHEAD};
   static uint8_t num_samples = 0;
   static uint8_t filled_window = FALSE;
