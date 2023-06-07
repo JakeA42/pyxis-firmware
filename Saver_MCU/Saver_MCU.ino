@@ -4,8 +4,8 @@
 #define SIG_POWER_MIN   -600
 #define P_K             1 // delete
 #define DEAD_AHEAD      180
-#define ANGLE_WIDE      10
-#define ANGLE_TIGHT     5
+#define ANGLE_WIDE      90
+#define ANGLE_TIGHT     40
 
 #define PORT_PIN      D10
 #define STAR_PIN      D9
@@ -81,8 +81,8 @@ static int SysForwardPowerPercentage = 40;
 static int SysReversePowerPercentage = 40;
 static int SysForwardPowerLimit = THRUSTER_NEUTRAL + THRUSTER_RANGE * SysForwardPowerPercentage / 100;
 static int SysReversePowerLimit = THRUSTER_NEUTRAL - THRUSTER_RANGE * SysReversePowerPercentage / 100;
-static int SysPivotFWValue = 1515;
-static int SysPivotRVValue = 1485;
+static int SysPivotFWValue = 1512;
+static int SysPivotRVValue = 1500;
 static int SysThrusterUpdateTime = THRUSTER_UPDATE_TIME;
 static int SysThrusterUpdateInterval = THRUSTER_UPDATE_MAX_INTERVAL;
 static int SysStaleDataTimeout = STALE_DATA_TIMEOUT;
@@ -90,10 +90,10 @@ static int SysSigPowerMax = SIG_POWER_MAX;
 static int SysSigPowerMin = SIG_POWER_MIN;
 static int SysAngleWide = ANGLE_WIDE;
 static int SysAngleTight = ANGLE_TIGHT;
-static int SysForwardOffset = 40;
-static int SysForwardOffsetFar = 40;
-static int SysForwardOffsetNear = 20;
-static int SysOrder = 2;
+static int SysForwardOffset = 50;
+static int SysForwardOffsetFar = 50;
+static int SysForwardOffsetNear = 50;
+static int SysOrder = 4;
 static int SysReflect = 1;
 static int SysDoaOffset = 0;
 static int SysSpeedChangePower = -300;
